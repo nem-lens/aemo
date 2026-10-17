@@ -1,0 +1,18 @@
+[package]
+name = "nem-lens-aemo"
+version = "0.1.0"
+edition = "2021"
+description = "Pure parsers for AEMO NEMWeb reports: C/I/D CSV tables, DispatchIS snapshots, market time and file names"
+license = "Apache-2.0"
+repository = "https://github.com/nem-lens/aemo"
+
+[dependencies]
+anyhow = "1"
+# No `clock` feature: the crate never reads the system time, which keeps it
+# deterministic and buildable for wasm32-unknown-unknown.
+chrono = { version = "0.4", default-features = false, features = ["std", "serde"] }
+chrono-tz = "0.10"
+csv = "1"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
