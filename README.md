@@ -20,14 +20,55 @@ let tables = nem_lens_aemo::parse_report(&members[0].1)?;
 let snap = nem_lens_aemo::dispatch_snapshot(&tables)?;
 ```
 
-Other reports (bids, unit solutions, next-day files) parse with `parse_report`
-and are read by table key. For example, `Next_Day_Offer_Energy_SPARSE` files
-(checked 17 Oct 2026) hold `BIDS_BIDDAYOFFER` and `BIDS_BIDOFFERPERIOD_SPARSE`,
-whose rows cover a run of periods (`PERIODID` to `PERIODIDTO`).
+Other reports (unit solutions, next-day dispatch) parse with `parse_report`
+and are read by table key.
 
-`parse_report` keeps every row in memory. A next-day offer file is about
-250 MB of CSV (1.6 million rows) and peaks near 2 GB parsed, so slice large
-files natively rather than in the browser.
+### Large files: stream them
+
+`parse_report` keeps every row in memory as strings. For large files, stream:
+`files::visit_csvs` decompresses a member as it is read and
+`visit_report` / `parse_report_where` handle one row at a time.
+
+```rust
+use nem_lens_aemo::bids::{read_offers, Direction, OfferFilter};
+
+let filter = OfferFilter {
+    duids: Some(["ADPBA1".to_string()].into()),
+    periods: Some((121, 156)), // 14:05 to 17:00 market time
+    ..Default::default()
+};
+let mut offers = None;
+nem_lens_aemo::files::visit_csvs(&zip_bytes, nem_lens_aemo::files::MAX_MEMBER_BYTES, |_, r| {
+    offers = Some(read_offers(r, &filter)?);
+    Ok(())
+})?;
+let offers = offers.unwrap();
+let index = offers.index();
+// The version submitted at or before `cutoff`, with its row for the period.
+let (day, period) = index.effective("ADPBA1", "ENERGY", Direction::Gen, interval_end, cutoff).unwrap();
+```
+
+On the trading day 16 Oct 2026 file (250 MB of CSV, 1.6 million rows):
+
+| Approach | Time | Peak memory |
+| --- | --- | --- |
+| `parse_report` (all rows as strings) | 2.5 s | about 2 GB |
+| `read_offers`, no filter (typed) | 4.5 s | 692 MB |
+| `read_offers`, one unit and a 3-hour window | 0.8 s | 16 MB |
+
+### Offers (`bids`)
+
+`Next_Day_Offer_Energy_SPARSE` holds every offer version for a trading day in
+`BIDS_BIDDAYOFFER` (price bands, one row per version) and
+`BIDS_BIDOFFERPERIOD_SPARSE` (band availability and ramp rates for runs of
+periods, `PERIODID` to `PERIODIDTO`). In the 16 Oct 2026 file, every period
+row joins exactly one day row on (DUID, DIRECTION, offer time), and each
+version's runs cover periods 1 to 288 exactly once. Batteries bid `GEN` and
+`LOAD` separately. Period 1 is the interval ending 04:05.
+
+`OfferIndex::effective` returns the latest version submitted at or before a
+cutoff the caller chooses; which rebids a dispatch run sees is AEMO's gate
+rule, so it is left to the engine.
 
 ## Development
 

@@ -64,35 +64,75 @@ pub fn unzip_csvs(bytes: &[u8]) -> Result<Vec<(String, Vec<u8>)>> {
 /// under-declares its size cannot exceed it.
 pub fn unzip_csvs_with_limit(bytes: &[u8], max_member: u64) -> Result<Vec<(String, Vec<u8>)>> {
     let mut out = Vec::new();
-    unzip_into(bytes, &mut out, 0, max_member)?;
+    visit_csvs(bytes, max_member, |name, r| {
+        let mut buf = Vec::new();
+        r.read_to_end(&mut buf)?;
+        out.push((name.to_string(), buf));
+        Ok(())
+    })?;
     Ok(out)
 }
 
-fn unzip_into(
+/// Stream each CSV member of a zip to `f` as it decompresses, without
+/// buffering it; pair with [`crate::report::visit_report`] for large files.
+/// Nested zips (one level) are buffered. Reading more than `max_member` bytes
+/// from a member is an error.
+pub fn visit_csvs(
     bytes: &[u8],
-    out: &mut Vec<(String, Vec<u8>)>,
+    max_member: u64,
+    mut f: impl FnMut(&str, &mut dyn Read) -> Result<()>,
+) -> Result<()> {
+    visit_into(bytes, 0, max_member, &mut f)
+}
+
+fn visit_into(
+    bytes: &[u8],
     depth: u8,
     max_member: u64,
+    f: &mut dyn FnMut(&str, &mut dyn Read) -> Result<()>,
 ) -> Result<()> {
     let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).context("not a zip archive")?;
     for i in 0..zip.len() {
-        let f = zip.by_index(i)?;
-        let name = f.name().to_string();
-        anyhow::ensure!(f.size() <= max_member, "zip member {name} too large");
-        let mut buf = Vec::with_capacity(f.size() as usize);
-        f.take(max_member + 1).read_to_end(&mut buf)?;
-        anyhow::ensure!(
-            buf.len() as u64 <= max_member,
-            "zip member {name} too large"
-        );
+        let file = zip.by_index(i)?;
+        let name = file.name().to_string();
+        anyhow::ensure!(file.size() <= max_member, "zip member {name} too large");
         let lower = name.to_ascii_lowercase();
+        let mut limited = Limited {
+            inner: file,
+            left: max_member,
+            name: name.clone(),
+        };
         if lower.ends_with(".csv") {
-            out.push((name, buf));
+            f(&name, &mut limited)?;
         } else if lower.ends_with(".zip") && depth == 0 {
-            unzip_into(&buf, out, depth + 1, max_member)?;
+            let mut buf = Vec::new();
+            limited.read_to_end(&mut buf)?;
+            visit_into(&buf, depth + 1, max_member, f)?;
         }
     }
     Ok(())
+}
+
+/// A reader that fails once more than `left` bytes have been read, so a member
+/// that under-declares its size still cannot exceed the limit.
+struct Limited<R> {
+    inner: R,
+    left: u64,
+    name: String,
+}
+
+impl<R: Read> Read for Limited<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        if n as u64 > self.left {
+            return Err(std::io::Error::other(format!(
+                "zip member {} too large",
+                self.name
+            )));
+        }
+        self.left -= n as u64;
+        Ok(n)
+    }
 }
 
 #[cfg(test)]
@@ -158,5 +198,38 @@ mod tests {
         assert!(unzip_csvs_with_limit(&z, 99).is_err());
         assert!(unzip_csvs_with_limit(&z, 100).is_ok());
         assert!(unzip_csvs(b"not a zip").is_err());
+    }
+
+    #[test]
+    fn reader_limit_holds_even_if_the_declared_size_lies() {
+        let mut r = Limited {
+            inner: Cursor::new(vec![b'x'; 100]),
+            left: 99,
+            name: "a.csv".into(),
+        };
+        let err = std::io::copy(&mut r, &mut std::io::sink()).unwrap_err();
+        assert!(err.to_string().contains("too large"));
+        let mut r = Limited {
+            inner: Cursor::new(vec![b'x'; 100]),
+            left: 100,
+            name: "a.csv".into(),
+        };
+        assert_eq!(std::io::copy(&mut r, &mut std::io::sink()).unwrap(), 100);
+    }
+
+    #[test]
+    fn visit_streams_members_into_the_report_visitor() {
+        let csv = b"I,A,X,1,ID\nD,A,X,1,a\nD,A,X,1,b\n";
+        let z = zip_of(&[("r.CSV", csv), ("skip.txt", b"x")]);
+        let mut ids = Vec::new();
+        visit_csvs(&z, MAX_MEMBER_BYTES, |name, r| {
+            assert_eq!(name, "r.CSV");
+            crate::report::visit_report(r, |rec| {
+                ids.push(rec.text("ID").unwrap_or_default().to_string());
+                Ok(())
+            })
+        })
+        .unwrap();
+        assert_eq!(ids, ["a", "b"]);
     }
 }
