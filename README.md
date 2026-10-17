@@ -21,7 +21,13 @@ let snap = nem_lens_aemo::dispatch_snapshot(&tables)?;
 ```
 
 Other reports (bids, unit solutions, next-day files) parse with `parse_report`
-and are read by table key, for example `tables["BIDS_BIDPEROFFER_D"]`.
+and are read by table key. For example, `Next_Day_Offer_Energy_SPARSE` files
+(checked 17 Oct 2026) hold `BIDS_BIDDAYOFFER` and `BIDS_BIDOFFERPERIOD_SPARSE`,
+whose rows cover a run of periods (`PERIODID` to `PERIODIDTO`).
+
+`parse_report` keeps every row in memory. A next-day offer file is about
+250 MB of CSV (1.6 million rows) and peaks near 2 GB parsed, so slice large
+files natively rather than in the browser.
 
 ## Development
 
