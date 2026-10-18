@@ -94,7 +94,7 @@ fn visit_into(
     let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).context("not a zip archive")?;
     for i in 0..zip.len() {
         let file = zip.by_index(i)?;
-        let name = file.name().to_string();
+        let name = file.name()?.to_string();
         anyhow::ensure!(file.size() <= max_member, "zip member {name} too large");
         let lower = name.to_ascii_lowercase();
         let mut limited = Limited {
