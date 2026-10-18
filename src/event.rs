@@ -247,9 +247,11 @@ pub struct InterconnectorSeries {
     pub id: String,
     pub from_region: String,
     pub to_region: String,
-    /// METEREDMWFLOW, MW (positive from `from_region`).
+    /// MWFLOW (the dispatch target the limits apply to), MW, positive from
+    /// `from_region`.
     pub flow: Vec<Option<f64>>,
-    /// IMPORTLIMIT and EXPORTLIMIT, MW.
+    /// IMPORTLIMIT and EXPORTLIMIT, MW, with AEMO's signs (the import limit
+    /// is the bound in the negative direction).
     pub import_limit: Vec<Option<f64>>,
     pub export_limit: Vec<Option<f64>>,
     /// IMPORTGENCONID and EXPORTGENCONID: the constraint setting each limit.
@@ -357,6 +359,20 @@ pub fn fuel_of(energy_source: &str) -> Option<&'static str> {
         "solar"
     } else {
         "other"
+    })
+}
+
+/// Regions at each end of a NEM interconnector, positive flow running
+/// from the first to the second (MMSDM INTERCONNECTOR REGIONFROM and
+/// REGIONTO).
+pub fn interconnector_ends(id: &str) -> Option<(&'static str, &'static str)> {
+    Some(match id {
+        "N-Q-MNSP1" | "NSW1-QLD1" => ("NSW1", "QLD1"),
+        "NSW1-SA1" => ("NSW1", "SA1"),
+        "T-V-MNSP1" => ("TAS1", "VIC1"),
+        "V-S-MNSP1" | "V-SA" => ("VIC1", "SA1"),
+        "VIC1-NSW1" => ("VIC1", "NSW1"),
+        _ => return None,
     })
 }
 
