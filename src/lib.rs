@@ -12,9 +12,12 @@
 //!   force for an interval.
 //! - [`time`]: market time (AEST, interval end), trading days, regional clocks.
 //! - [`files`]: NEMWeb file name patterns and unzipping (buffered or streamed).
+//! - [`event`]: the NEM Lens event record schema, each file and field tagged
+//!   public or private, and the gate that keeps the public library public.
 
 pub mod bids;
 pub mod dispatch;
+pub mod event;
 pub mod files;
 pub mod report;
 pub mod time;
