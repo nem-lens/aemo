@@ -3,10 +3,14 @@
 //!
 //! The public event library (`nem-lens/library`, the replay dashboard) is a
 //! view of the record: only what is directly derived from AEMO's published
-//! figures, for real events. The full record, with the engine's replay,
-//! counterfactuals and attribution, stays in the private store that
-//! cf-report reads. [`check_public_file`] is the gate the publisher runs
-//! on every file before it reaches the library.
+//! figures, for real events. The full record adds the AEMO tables as
+//! fetched, kept in the private store that cf-report reads.
+//! [`check_public_file`] is the gate the publisher runs on every file before
+//! it reaches the library.
+//!
+//! Nothing the engine computes is stored anywhere (owner, 19 Oct 2026): the
+//! replay, counterfactuals and attribution are computed on the user's own
+//! machine, in WebAssembly, from the stored record.
 //!
 //! ```text
 //! events/<id>/headline.json          public   AEMO headline (private fields stripped)
@@ -17,14 +21,12 @@
 //! events/<id>/constraints.json       public   binding constraints, AEMO marginal values and descriptions
 //! events/<id>/unavailability.json    public   units out or derated, with rebid explanations
 //! events/<id>/notices.json           public   AEMO market notices in the window
-//! events/<id>/bundle/*.parquet       private  AEMO tables as fetched (inputs, not displayed)
-//! events/<id>/model/...              private  engine snapshots, baseline replay, fidelity
-//! events/<id>/cf/...                 private  sliders, grid, scenarios, attribution, briefs
+//! events/<id>/bundle/...             private  AEMO tables as fetched and market notices (engine inputs, not displayed)
 //! ```
 //!
-//! Model baseline and fidelity are private pending the owner's long-term
-//! decision on a third public page; making them public is a change of tag
-//! here, not a new schema.
+//! The headline's engine fields are computed, never stored; they are private
+//! pending the owner's long-term decision on a third public page for the
+//! model baseline, and making them public is a change of tag here.
 
 use std::collections::BTreeMap;
 
@@ -111,19 +113,7 @@ pub const FILES: &[FileSpec] = &[
         path: "bundle/",
         visibility: Private,
         producer: "monitor",
-        contents: "AEMO tables as fetched (Parquet), engine inputs",
-    },
-    FileSpec {
-        path: "model/",
-        visibility: Private,
-        producer: "engine",
-        contents: "engine snapshots, baseline replay, fidelity against AEMO",
-    },
-    FileSpec {
-        path: "cf/",
-        visibility: Private,
-        producer: "cf-report",
-        contents: "sliders, sensitivity grid, scenarios, attribution, fact sheet, brief",
+        contents: "AEMO tables as fetched (Parquet) and market notices, engine inputs",
     },
 ];
 
@@ -176,10 +166,12 @@ pub struct Headline {
     /// Sum of AEMO price x AEMO demand (TOTALDEMAND) over the span, $.
     pub cost_to_load: f64,
     pub max_demand_mw: f64,
-    /// Private: the engine's mean baseline price over the span, $/MWh.
+    /// Private, computed (never stored): the engine's mean baseline price
+    /// over the span, $/MWh.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub baseline_mean_price: Option<f64>,
-    /// Private: each scenario's change in mean price against the baseline.
+    /// Private, computed (never stored): each scenario's change in mean
+    /// price against the baseline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scenarios: Option<Vec<ScenarioChange>>,
 }
@@ -328,10 +320,106 @@ pub struct Notices {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Notice {
     pub id: String,
-    /// NOTICETYPE, e.g. "RESERVE NOTICE".
+    /// Notice type, e.g. "RESERVE NOTICE" or "INTER-REGIONAL TRANSFER".
     pub kind: String,
+    /// Creation time, market time with offset.
     pub issued: String,
+    /// AEMO's external reference: a one-line title.
+    pub title: String,
+    /// The notice text.
     pub reason: String,
+}
+
+/// The fuel name used in public files for an AEMO CO2E_ENERGY_SOURCE
+/// (MMSDM GENUNITS): coal, gas, liquid, hydro, wind, solar, battery,
+/// bioenergy or other; `None` when blank.
+pub fn fuel_of(energy_source: &str) -> Option<&'static str> {
+    let s = energy_source.trim().to_ascii_lowercase();
+    let has = |w: &str| s.contains(w);
+    if s.is_empty() {
+        return None;
+    }
+    Some(if has("battery") {
+        "battery"
+    } else if has("bio") || has("bagasse") || has("landfill") {
+        "bioenergy"
+    } else if has("gas") || has("methane") || has("ethane") {
+        "gas"
+    } else if has("coal") {
+        "coal"
+    } else if has("diesel") || has("kerosene") || has("oil") {
+        "liquid"
+    } else if has("hydro") || has("water") {
+        "hydro"
+    } else if has("wind") {
+        "wind"
+    } else if has("solar") {
+        "solar"
+    } else {
+        "other"
+    })
+}
+
+/// Whether an AEMO constraint description marks a network outage
+/// ("Out = <element>") rather than system normal ("Out = Nil").
+pub fn is_outage_description(description: &str) -> bool {
+    let d = description.trim_start();
+    let Some(rest) = d
+        .strip_prefix("Out")
+        .or_else(|| d.strip_prefix("OUT"))
+        .or_else(|| d.strip_prefix("out"))
+    else {
+        return false;
+    };
+    let rest = rest
+        .trim_start()
+        .trim_start_matches(['=', ':'])
+        .trim_start();
+    !rest.is_empty() && !rest.to_ascii_lowercase().starts_with("nil")
+}
+
+/// Parse one AEMO market notice (NEMWeb `Market_Notice`,
+/// `NEMITWEB1_MKTNOTICE_*.R<id>`), a plain-text report. Times are market
+/// time.
+pub fn parse_market_notice(text: &str) -> Option<Notice> {
+    let field = |name: &str| {
+        text.lines().find_map(|l| {
+            let (k, v) = l.split_once(':')?;
+            (k.trim() == name).then(|| v.trim().to_string())
+        })
+    };
+    let id = field("Notice ID")?;
+    let kind = field("Notice Type ID").unwrap_or_default();
+    let title = field("External Reference").unwrap_or_default();
+    // "Creation Date :     12/10/2026     11:24:11"
+    let created = text
+        .lines()
+        .find(|l| l.trim_start().starts_with("Creation Date"))
+        .and_then(|l| l.split_once(':'))
+        .map(|(_, v)| v.split_whitespace().collect::<Vec<_>>())
+        .and_then(|p| {
+            let d = chrono::NaiveDate::parse_from_str(p.first()?, "%d/%m/%Y").ok()?;
+            let t = chrono::NaiveTime::parse_from_str(p.get(1)?, "%H:%M:%S").ok()?;
+            Some(crate::time::iso_market(d.and_time(t)))
+        })?;
+    let reason = text
+        .split_once("Reason :")
+        .map(|(_, r)| {
+            r.lines()
+                .take_while(|l| !l.starts_with("-----"))
+                .collect::<Vec<_>>()
+                .join("\n")
+                .trim()
+                .to_string()
+        })
+        .unwrap_or_default();
+    Some(Notice {
+        id,
+        kind,
+        issued: created,
+        title,
+        reason,
+    })
 }
 
 /// Refuse a file the publisher is about to put in the public library: its
@@ -404,6 +492,59 @@ mod tests {
         let back: Headline = serde_json::from_slice(&public).unwrap();
         assert_eq!(back.baseline_mean_price, None);
         assert_eq!(back.peak_price, 23_107.0);
+    }
+
+    #[test]
+    fn notices_parse() {
+        let text = "\
+-------------------------------------------------------------------
+                           MARKET NOTICE
+-------------------------------------------------------------------
+
+From :              AEMO
+To   :              NEMITWEB1
+Creation Date :     12/10/2026     11:24:11
+
+-------------------------------------------------------------------
+
+Notice ID               :         145591
+Notice Type ID          :         INTER-REGIONAL TRANSFER
+Notice Type Description :         Inter-Regional Transfer limit variation
+Issue Date              :         12/10/2026
+External Reference      :         Inter-regional transfer limit variation - Bendigo to Shepparton 220kV line - VIC region - 12/10/2026
+
+-------------------------------------------------------------------
+
+Reason :
+
+AEMO ELECTRICITY MARKET NOTICE
+
+At   1107 hrs 12/10/2026 there was an unplanned outage of Bendigo to Shepparton 220kV line.
+
+-------------------------------------------------------------------
+END OF REPORT
+";
+        let n = parse_market_notice(text).unwrap();
+        assert_eq!(n.id, "145591");
+        assert_eq!(n.kind, "INTER-REGIONAL TRANSFER");
+        assert_eq!(n.issued, "2026-10-12T11:24:11+10:00");
+        assert!(n
+            .title
+            .starts_with("Inter-regional transfer limit variation"));
+        assert!(n.reason.contains("unplanned outage of Bendigo"));
+        assert!(!n.reason.contains("END OF REPORT"));
+    }
+
+    #[test]
+    fn fuels_and_outage_descriptions() {
+        assert_eq!(fuel_of("Black coal"), Some("coal"));
+        assert_eq!(fuel_of("Coal seam methane"), Some("gas"));
+        assert_eq!(fuel_of("Landfill biogas methane"), Some("bioenergy"));
+        assert_eq!(fuel_of("Battery Storage"), Some("battery"));
+        assert_eq!(fuel_of(""), None);
+        assert!(is_outage_description("Out = Canberra-Capital (6) line"));
+        assert!(!is_outage_description("Out= Nil, Limit Heywood flows"));
+        assert!(!is_outage_description("Hard Ramping constraint"));
     }
 
     #[test]
