@@ -119,6 +119,11 @@ pub struct OfferFilter {
     pub bid_types: Option<HashSet<String>>,
     /// Keep period rows overlapping this inclusive range of periods.
     pub periods: Option<(u16, u16)>,
+    /// Keep only period rows that cover one of their version's periods here
+    /// (the periods in which it is in force, see [`OfferIndex::in_force`]):
+    /// [`OfferIndex::effective`] reads no others. Day offers are kept
+    /// whatever their version.
+    pub versions: Option<HashMap<VersionKey, HashSet<u16>>>,
 }
 
 impl OfferFilter {
@@ -158,7 +163,15 @@ impl Offers {
                 let overlaps = filter
                     .periods
                     .is_none_or(|(a, b)| p.period_from <= b && p.period_to >= a);
-                if overlaps {
+                let wanted = filter.versions.as_ref().is_none_or(|v| {
+                    let version = (
+                        key(&p.duid, &p.bid_type, p.direction, p.trading_date),
+                        p.offer_time,
+                    );
+                    v.get(&version)
+                        .is_some_and(|periods| periods.iter().any(|&q| p.covers(q)))
+                });
+                if overlaps && wanted {
                     self.periods.push(p);
                 }
             }
@@ -295,6 +308,9 @@ fn period_offer(r: &impl Fields) -> Result<PeriodOffer> {
 /// (DUID, BIDTYPE, DIRECTION, trading date): one unit's offers for one service and day.
 pub type UnitKey = (String, String, Direction, NaiveDate);
 
+/// One offer version: its unit and offer time.
+pub type VersionKey = (UnitKey, NaiveDateTime);
+
 /// Lookup from a unit to its offer versions, built by [`Offers::index`].
 pub struct OfferIndex<'a> {
     /// Day offers per unit, sorted by offer time.
@@ -353,17 +369,47 @@ impl<'a> OfferIndex<'a> {
         interval_end: NaiveDateTime,
         cutoff: NaiveDateTime,
     ) -> Option<(&'a DayOffer, &'a PeriodOffer)> {
-        let (day, period) = period_of(interval_end);
-        let unit = key(duid, bid_type, direction, day);
-        let versions = self.versions.get(&unit)?;
-        let n = versions.partition_point(|d| d.offer_time <= cutoff);
-        let day_offer = *versions.get(n.checked_sub(1)?)?;
+        let day_offer = self.in_force(duid, bid_type, direction, interval_end, cutoff)?;
+        let (_, period) = period_of(interval_end);
         let row = self
             .periods
-            .get(&(unit, day_offer.offer_time))?
+            .get(&day_offer.version())?
             .iter()
             .find(|p| p.covers(period))?;
         Some((day_offer, row))
+    }
+
+    /// The version [`OfferIndex::effective`] takes its period row from:
+    /// the latest submitted at or before `cutoff` for the trading day of
+    /// `interval_end`. Needs only day offers, so a reader can find the
+    /// versions it needs before reading any period rows.
+    pub fn in_force(
+        &self,
+        duid: &str,
+        bid_type: &str,
+        direction: Direction,
+        interval_end: NaiveDateTime,
+        cutoff: NaiveDateTime,
+    ) -> Option<&'a DayOffer> {
+        let (day, _) = period_of(interval_end);
+        let versions = self.versions.get(&key(duid, bid_type, direction, day))?;
+        let n = versions.partition_point(|d| d.offer_time <= cutoff);
+        versions.get(n.checked_sub(1)?).copied()
+    }
+}
+
+impl DayOffer {
+    /// This offer's version, as period rows are grouped by.
+    pub fn version(&self) -> VersionKey {
+        (
+            key(
+                &self.duid,
+                &self.bid_type,
+                self.direction,
+                self.trading_date,
+            ),
+            self.offer_time,
+        )
     }
 }
 
@@ -495,6 +541,42 @@ D,BIDS,BIDOFFERPERIOD_SPARSE,1,U1,ENERGY,2020/01/31 00:00:00,2020/01/30 12:00:00
             .unwrap()
             .periods
             .is_empty());
+    }
+
+    #[test]
+    fn version_filter_keeps_the_versions_in_force() {
+        let all = read_offers(SAMPLE.as_bytes(), &OfferFilter::default()).unwrap();
+        let full = all.index();
+        let (end, cutoff) = (t("2026/10/16 14:35:00"), t("2026/10/16 14:00:00"));
+        let v2 = full
+            .in_force("U1", "ENERGY", Direction::Gen, end, cutoff)
+            .unwrap();
+        assert_eq!(v2.price_bands[9], 15000.0);
+        let (_, period) = period_of(end);
+        let f = OfferFilter {
+            versions: Some(HashMap::from([(v2.version(), HashSet::from([period]))])),
+            ..Default::default()
+        };
+        let some = read_offers(SAMPLE.as_bytes(), &f).unwrap();
+        assert_eq!(some.day.len(), 3, "day offers are all kept");
+        assert_eq!(some.periods.len(), 1, "only version 2's row");
+        // A version's rows that cover none of its periods are dropped.
+        let elsewhere = OfferFilter {
+            versions: Some(HashMap::from([(v2.version(), HashSet::from([300]))])),
+            ..Default::default()
+        };
+        assert!(read_offers(SAMPLE.as_bytes(), &elsewhere)
+            .unwrap()
+            .periods
+            .is_empty());
+        let part = some.index();
+        let pick = |idx: &OfferIndex, cut| {
+            idx.effective("U1", "ENERGY", Direction::Gen, end, cut)
+                .map(|(d, p)| (d.offer_time, p.max_avail))
+        };
+        assert_eq!(pick(&part, cutoff), pick(&full, cutoff));
+        // A version not kept has no period row.
+        assert_eq!(pick(&part, t("2026/10/16 13:00:00")), None);
     }
 
     #[test]
