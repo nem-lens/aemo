@@ -23,6 +23,9 @@ pub mod report;
 pub mod time;
 
 pub use dispatch::{
-    dispatch_snapshot, ConstraintRow, DispatchSnapshot, InterconnectorRow, RegionInterval,
+    dispatch_snapshot, snapshot_from, ConstraintRow, DispatchSnapshot, InterconnectorRow,
+    RegionInterval,
 };
-pub use report::{parse_report, parse_report_where, visit_report, Record, Table, Tables};
+pub use report::{
+    parse_report, parse_report_where, visit_report, Fields, Record, Table, TableRow, Tables,
+};

@@ -6,8 +6,7 @@ use anyhow::{Context, Result};
 use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
 
-use crate::report::{Table, Tables};
-use crate::time::parse_market;
+use crate::report::{Fields, Table, Tables};
 
 /// One dispatch interval as published in a DispatchIS file (pricing run only).
 #[derive(Debug, Clone, Default)]
@@ -53,28 +52,53 @@ pub fn is_pricing_run(t: &Table, row: &[String]) -> bool {
         .unwrap_or(true)
 }
 
+/// [`is_pricing_run`] for any row.
+pub fn is_pricing_row(r: &impl Fields) -> bool {
+    r.text("INTERVENTION").is_none_or(|v| v == "0")
+}
+
 /// Extract prices, region totals, constraints and interconnectors from a DispatchIS report.
 pub fn dispatch_snapshot(tables: &Tables) -> Result<DispatchSnapshot> {
     let price = tables
         .get("DISPATCH_PRICE")
         .context("report has no DISPATCH,PRICE table")?;
+    let rows = |key: &'static str| {
+        tables
+            .get(key)
+            .into_iter()
+            .flat_map(move |t| t.records(key))
+    };
+    snapshot_from(
+        price.records("DISPATCH_PRICE"),
+        rows("DISPATCH_REGIONSUM"),
+        rows("DISPATCH_CONSTRAINT"),
+        rows("DISPATCH_INTERCONNECTORRES"),
+    )
+}
+
+/// [`dispatch_snapshot`] from one interval's rows of DISPATCH,PRICE,
+/// REGIONSUM, CONSTRAINT and INTERCONNECTORRES.
+pub fn snapshot_from<F: Fields>(
+    price: impl IntoIterator<Item = F>,
+    regionsum: impl IntoIterator<Item = F>,
+    constraint: impl IntoIterator<Item = F>,
+    interconnectorres: impl IntoIterator<Item = F>,
+) -> Result<DispatchSnapshot> {
     let mut snap = DispatchSnapshot::default();
     let mut settlement = None;
 
-    for row in &price.rows {
-        if !is_pricing_run(price, row) {
+    for r in price {
+        if !is_pricing_row(&r) {
             continue;
         }
-        let (Some(region), Some(rrp), Some(sd)) = (
-            price.col(row, "REGIONID"),
-            price.num(row, "RRP"),
-            price.col(row, "SETTLEMENTDATE").and_then(parse_market),
-        ) else {
+        let (Some(region), Some(rrp), Some(sd)) =
+            (r.text("REGIONID"), r.num("RRP"), r.time("SETTLEMENTDATE"))
+        else {
             continue;
         };
         settlement = Some(settlement.map_or(sd, |s: NaiveDateTime| s.max(sd)));
         snap.regions.insert(
-            region.trim().to_string(),
+            region.into_owned(),
             RegionInterval {
                 rrp,
                 ..Default::default()
@@ -83,56 +107,50 @@ pub fn dispatch_snapshot(tables: &Tables) -> Result<DispatchSnapshot> {
     }
     snap.settlement = settlement.context("no priced regions in report")?;
 
-    if let Some(rs) = tables.get("DISPATCH_REGIONSUM") {
-        for row in &rs.rows {
-            if !is_pricing_run(rs, row) {
-                continue;
-            }
-            if let Some(r) = rs
-                .col(row, "REGIONID")
-                .and_then(|id| snap.regions.get_mut(id.trim()))
-            {
-                r.demand = rs.num(row, "TOTALDEMAND");
-                r.available_gen = rs.num(row, "AVAILABLEGENERATION");
-                r.net_interchange = rs.num(row, "NETINTERCHANGE");
-            }
+    for r in regionsum {
+        if !is_pricing_row(&r) {
+            continue;
+        }
+        if let Some(x) = r
+            .text("REGIONID")
+            .and_then(|id| snap.regions.get_mut(id.as_ref()))
+        {
+            x.demand = r.num("TOTALDEMAND");
+            x.available_gen = r.num("AVAILABLEGENERATION");
+            x.net_interchange = r.num("NETINTERCHANGE");
         }
     }
 
-    if let Some(c) = tables.get("DISPATCH_CONSTRAINT") {
-        for row in &c.rows {
-            if !is_pricing_run(c, row) {
-                continue;
-            }
-            let Some(id) = c.col(row, "CONSTRAINTID") else {
-                continue;
-            };
-            snap.constraints.push(ConstraintRow {
-                id: id.trim().to_string(),
-                rhs: c.num(row, "RHS"),
-                lhs: c.num(row, "LHS"),
-                marginal: c.num(row, "MARGINALVALUE").unwrap_or(0.0),
-                violation: c.num(row, "VIOLATIONDEGREE").unwrap_or(0.0),
-            });
+    for r in constraint {
+        if !is_pricing_row(&r) {
+            continue;
         }
+        let Some(id) = r.text("CONSTRAINTID") else {
+            continue;
+        };
+        snap.constraints.push(ConstraintRow {
+            id: id.into_owned(),
+            rhs: r.num("RHS"),
+            lhs: r.num("LHS"),
+            marginal: r.num("MARGINALVALUE").unwrap_or(0.0),
+            violation: r.num("VIOLATIONDEGREE").unwrap_or(0.0),
+        });
     }
 
-    if let Some(ic) = tables.get("DISPATCH_INTERCONNECTORRES") {
-        for row in &ic.rows {
-            if !is_pricing_run(ic, row) {
-                continue;
-            }
-            let Some(id) = ic.col(row, "INTERCONNECTORID") else {
-                continue;
-            };
-            snap.interconnectors.push(InterconnectorRow {
-                id: id.trim().to_string(),
-                flow: ic.num(row, "MWFLOW").unwrap_or(0.0),
-                export_limit: ic.num(row, "EXPORTLIMIT"),
-                import_limit: ic.num(row, "IMPORTLIMIT"),
-                marginal: ic.num(row, "MARGINALVALUE").unwrap_or(0.0),
-            });
+    for r in interconnectorres {
+        if !is_pricing_row(&r) {
+            continue;
         }
+        let Some(id) = r.text("INTERCONNECTORID") else {
+            continue;
+        };
+        snap.interconnectors.push(InterconnectorRow {
+            id: id.into_owned(),
+            flow: r.num("MWFLOW").unwrap_or(0.0),
+            export_limit: r.num("EXPORTLIMIT"),
+            import_limit: r.num("IMPORTLIMIT"),
+            marginal: r.num("MARGINALVALUE").unwrap_or(0.0),
+        });
     }
     Ok(snap)
 }

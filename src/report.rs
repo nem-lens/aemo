@@ -8,11 +8,40 @@
 //! [`parse_report`] collects every table in memory. For large files (a
 //! next-day offer file is about 250 MB of CSV) use [`visit_report`] or
 //! [`parse_report_where`], which stream rows from any reader.
+//!
+//! The typed parsers ([`crate::bids`], [`crate::dispatch`]) read rows
+//! through [`Fields`], so the same rules apply to a streamed [`Record`], a
+//! parsed [`Table`] row, or a row of typed columns held elsewhere (an event
+//! bundle's Parquet).
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::Read;
 
 use anyhow::{Context, Result};
+use chrono::NaiveDateTime;
+
+use crate::time::parse_market;
+
+/// Named fields of one row in a table keyed like "BIDS_BIDDAYOFFER".
+pub trait Fields {
+    /// The table key, e.g. "DISPATCH_PRICE".
+    fn key(&self) -> &str;
+
+    /// A trimmed, non-empty field as text, or `None` if the column is
+    /// absent or the field empty.
+    fn text(&self, name: &str) -> Option<Cow<'_, str>>;
+
+    /// A field as a number.
+    fn num(&self, name: &str) -> Option<f64> {
+        self.text(name).and_then(|s| s.parse().ok())
+    }
+
+    /// A field as a market time.
+    fn time(&self, name: &str) -> Option<NaiveDateTime> {
+        self.text(name).and_then(|s| parse_market(&s))
+    }
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct Table {
@@ -37,6 +66,36 @@ impl Table {
     pub fn num(&self, row: &[String], name: &str) -> Option<f64> {
         self.col(row, name)
             .and_then(|s| s.trim().parse::<f64>().ok())
+    }
+
+    /// Each row as [`Fields`], under the table key `key`.
+    pub fn records<'a>(&'a self, key: &'a str) -> impl Iterator<Item = TableRow<'a>> {
+        self.rows.iter().map(move |row| TableRow {
+            key,
+            table: self,
+            row,
+        })
+    }
+}
+
+/// One row of a [`Table`], as [`Fields`].
+pub struct TableRow<'a> {
+    pub key: &'a str,
+    pub table: &'a Table,
+    pub row: &'a [String],
+}
+
+impl Fields for TableRow<'_> {
+    fn key(&self) -> &str {
+        self.key
+    }
+
+    fn text(&self, name: &str) -> Option<Cow<'_, str>> {
+        self.table
+            .col(self.row, name)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(Cow::Borrowed)
     }
 }
 
@@ -88,6 +147,16 @@ impl<'a> Record<'a> {
     /// Field values aligned with `header.columns`.
     pub fn values(&self) -> impl Iterator<Item = &'a str> {
         self.fields.iter().skip(4)
+    }
+}
+
+impl Fields for Record<'_> {
+    fn key(&self) -> &str {
+        self.key
+    }
+
+    fn text(&self, name: &str) -> Option<Cow<'_, str>> {
+        Record::text(self, name).map(Cow::Borrowed)
     }
 }
 

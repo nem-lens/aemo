@@ -22,8 +22,8 @@ use std::io::Read;
 use anyhow::{Context, Result};
 use chrono::{Duration, NaiveDate, NaiveDateTime, NaiveTime};
 
-use crate::report::{visit_report, Record};
-use crate::time::{parse_market, trading_day};
+use crate::report::{visit_report, Fields};
+use crate::time::trading_day;
 
 pub const DAY_OFFER_TABLE: &str = "BIDS_BIDDAYOFFER";
 pub const PERIOD_OFFER_TABLE: &str = "BIDS_BIDOFFERPERIOD_SPARSE";
@@ -122,10 +122,10 @@ pub struct OfferFilter {
 }
 
 impl OfferFilter {
-    fn unit_ok(&self, r: &Record) -> bool {
+    fn unit_ok(&self, r: &impl Fields) -> bool {
         let has = |set: &Option<HashSet<String>>, col: &str| {
             set.as_ref()
-                .is_none_or(|s| r.text(col).is_some_and(|v| s.contains(v)))
+                .is_none_or(|s| r.text(col).is_some_and(|v| s.contains(v.as_ref())))
         };
         has(&self.duids, "DUID") && has(&self.bid_types, "BIDTYPE")
     }
@@ -142,72 +142,83 @@ pub struct Offers {
 /// version in force needs them all.
 pub fn read_offers<R: Read>(reader: R, filter: &OfferFilter) -> Result<Offers> {
     let mut out = Offers::default();
-    visit_report(reader, |r| {
-        match r.key {
-            DAY_OFFER_TABLE if filter.unit_ok(r) => out.day.push(day_offer(r)?),
+    visit_report(reader, |r| out.push(r, filter))?;
+    Ok(out)
+}
+
+impl Offers {
+    /// Keep `r` if it is a day or period offer row that passes `filter`;
+    /// rows of other tables are ignored. [`read_offers`] calls this for
+    /// every row of a file.
+    pub fn push(&mut self, r: &impl Fields, filter: &OfferFilter) -> Result<()> {
+        match r.key() {
+            DAY_OFFER_TABLE if filter.unit_ok(r) => self.day.push(day_offer(r)?),
             PERIOD_OFFER_TABLE if filter.unit_ok(r) => {
                 let p = period_offer(r)?;
                 let overlaps = filter
                     .periods
                     .is_none_or(|(a, b)| p.period_from <= b && p.period_to >= a);
                 if overlaps {
-                    out.periods.push(p);
+                    self.periods.push(p);
                 }
             }
             _ => {}
         }
         Ok(())
-    })?;
-    Ok(out)
+    }
 }
 
-fn required<'a>(r: &Record<'a>, col: &str) -> Result<&'a str> {
+fn required<'a>(r: &'a impl Fields, col: &str) -> Result<std::borrow::Cow<'a, str>> {
     r.text(col)
-        .with_context(|| format!("{} row is missing {col}", r.key))
+        .with_context(|| format!("{} row is missing {col}", r.key()))
 }
 
-fn time(r: &Record, col: &str) -> Result<NaiveDateTime> {
-    let s = required(r, col)?;
-    parse_market(s).with_context(|| format!("{} {col} is not a market time: {s}", r.key))
+fn time(r: &impl Fields, col: &str) -> Result<NaiveDateTime> {
+    let t = r.time(col);
+    t.with_context(|| match r.text(col) {
+        Some(s) => format!("{} {col} is not a market time: {s}", r.key()),
+        None => format!("{} row is missing {col}", r.key()),
+    })
 }
 
-fn bands(r: &Record, prefix: &str) -> Result<[f64; 10]> {
+fn bands(r: &impl Fields, prefix: &str) -> Result<[f64; 10]> {
     let mut out = [0.0; 10];
     for (i, v) in out.iter_mut().enumerate() {
         let col = format!("{prefix}{}", i + 1);
         *v = r
             .num(&col)
-            .with_context(|| format!("{} row is missing {col}", r.key))?;
+            .with_context(|| format!("{} row is missing {col}", r.key()))?;
     }
     Ok(out)
 }
 
-fn day_offer(r: &Record) -> Result<DayOffer> {
+fn day_offer(r: &impl Fields) -> Result<DayOffer> {
+    let text = |c: &str| r.text(c).unwrap_or_default().into_owned();
     Ok(DayOffer {
-        duid: required(r, "DUID")?.to_string(),
-        bid_type: required(r, "BIDTYPE")?.to_string(),
-        direction: Direction::parse(r.get("DIRECTION")),
+        duid: required(r, "DUID")?.into_owned(),
+        bid_type: required(r, "BIDTYPE")?.into_owned(),
+        direction: Direction::parse(r.text("DIRECTION").as_deref()),
         trading_date: time(r, "SETTLEMENTDATE")?.date(),
         offer_time: time(r, "OFFERDATE")?,
         version_no: r.text("VERSIONNO").and_then(|v| v.parse().ok()),
-        participant_id: r.text("PARTICIPANTID").unwrap_or_default().to_string(),
+        participant_id: text("PARTICIPANTID"),
         price_bands: bands(r, "PRICEBAND")?,
         daily_energy_constraint: r.num("DAILYENERGYCONSTRAINT"),
         minimum_load: r.num("MINIMUMLOAD"),
-        rebid_explanation: r.text("REBIDEXPLANATION").unwrap_or_default().to_string(),
-        rebid_category: r.text("REBID_CATEGORY").unwrap_or_default().to_string(),
-        entry_type: r.text("ENTRYTYPE").unwrap_or_default().to_string(),
+        rebid_explanation: text("REBIDEXPLANATION"),
+        rebid_category: text("REBID_CATEGORY"),
+        entry_type: text("ENTRYTYPE"),
     })
 }
 
-fn period(r: &Record, col: &str) -> Result<u16> {
+fn period(r: &impl Fields, col: &str) -> Result<u16> {
     let p: u16 = required(r, col)?
         .parse()
-        .with_context(|| format!("{} {col} is not a period", r.key))?;
+        .with_context(|| format!("{} {col} is not a period", r.key()))?;
     anyhow::ensure!(
         (1..=PERIODS_PER_DAY).contains(&p),
         "{} {col} {p} is out of range",
-        r.key
+        r.key()
     );
     Ok(p)
 }
@@ -220,7 +231,7 @@ fn five_minute_day() -> NaiveDate {
 
 /// A time from the first of `cols` present: the sparse table and the older
 /// BIDPEROFFER table name the same fields differently.
-fn time_of(r: &Record, cols: &[&str]) -> Result<NaiveDateTime> {
+fn time_of(r: &impl Fields, cols: &[&str]) -> Result<NaiveDateTime> {
     let col = cols
         .iter()
         .find(|c| r.text(c).is_some())
@@ -232,7 +243,7 @@ fn time_of(r: &Record, cols: &[&str]) -> Result<NaiveDateTime> {
 /// The five-minute periods a row covers. A BIDPEROFFER row has PERIODID
 /// alone: one period, or before five-minute settlement one 30-minute
 /// trading interval, which is six five-minute periods.
-fn periods(r: &Record, day: NaiveDate) -> Result<(u16, u16)> {
+fn periods(r: &impl Fields, day: NaiveDate) -> Result<(u16, u16)> {
     if r.text("PERIODIDTO").is_some() {
         return Ok((period(r, "PERIODID")?, period(r, "PERIODIDTO")?));
     }
@@ -242,27 +253,27 @@ fn periods(r: &Record, day: NaiveDate) -> Result<(u16, u16)> {
     }
     let p: u16 = required(r, "PERIODID")?
         .parse()
-        .with_context(|| format!("{} PERIODID is not a period", r.key))?;
+        .with_context(|| format!("{} PERIODID is not a period", r.key()))?;
     anyhow::ensure!(
         (1..=PERIODS_PER_DAY / 6).contains(&p),
         "{} PERIODID {p} is out of range for 30-minute periods",
-        r.key
+        r.key()
     );
     Ok(((p - 1) * 6 + 1, p * 6))
 }
 
-fn period_offer(r: &Record) -> Result<PeriodOffer> {
+fn period_offer(r: &impl Fields) -> Result<PeriodOffer> {
     let trading_date = time_of(r, &["TRADINGDATE", "SETTLEMENTDATE"])?.date();
     let (period_from, period_to) = periods(r, trading_date)?;
     anyhow::ensure!(
         period_from <= period_to,
         "{} PERIODID {period_from} is after PERIODIDTO {period_to}",
-        r.key
+        r.key()
     );
     Ok(PeriodOffer {
-        duid: required(r, "DUID")?.to_string(),
-        bid_type: required(r, "BIDTYPE")?.to_string(),
-        direction: Direction::parse(r.get("DIRECTION")),
+        duid: required(r, "DUID")?.into_owned(),
+        bid_type: required(r, "BIDTYPE")?.into_owned(),
+        direction: Direction::parse(r.text("DIRECTION").as_deref()),
         trading_date,
         offer_time: time_of(r, &["OFFERDATETIME", "OFFERDATE"])?,
         period_from,
@@ -359,6 +370,7 @@ impl<'a> OfferIndex<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::time::parse_market;
 
     const SAMPLE: &str = "\
 I,BIDS,BIDDAYOFFER,1,DUID,BIDTYPE,SETTLEMENTDATE,OFFERDATE,VERSIONNO,PARTICIPANTID,PRICEBAND1,PRICEBAND2,PRICEBAND3,PRICEBAND4,PRICEBAND5,PRICEBAND6,PRICEBAND7,PRICEBAND8,PRICEBAND9,PRICEBAND10,DIRECTION
