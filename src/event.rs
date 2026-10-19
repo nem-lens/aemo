@@ -166,6 +166,10 @@ pub struct Headline {
     /// Sum of AEMO price x AEMO demand (TOTALDEMAND) over the span, $.
     pub cost_to_load: f64,
     pub max_demand_mw: f64,
+    /// Facets for browsing, `key:value`, derived from AEMO data only (see
+    /// [`TAG_KEYS`]). Absent in files written before tags existed.
+    #[serde(default)]
+    pub tags: Vec<String>,
     /// Private, computed (never stored): the engine's mean baseline price
     /// over the span, $/MWh.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -332,6 +336,74 @@ pub struct Notice {
     pub reason: String,
 }
 
+/// Tag keys on a headline, each `key:value`:
+///
+/// | Key | Values | From |
+/// | --- | --- | --- |
+/// | `year` | e.g. `2022` | event start, market time |
+/// | `season` | `summer` (Dec-Feb), `autumn`, `winter`, `spring` | event start month |
+/// | `region` | `NSW1`, `QLD1`, `VIC1`, `SA1`, `TAS1` | event region |
+/// | `severity` | `cap` (peak at or above 95% of the price cap), `extreme` (at or above $10,000), `high` | peak price against [`market_price_cap`] |
+/// | `price` | `at-cap` (peak at the cap), `negative` (a negative price in the span), `floor` (at the price floor) | DISPATCH PRICE RRP |
+/// | `pricing` | `administered` (APCFLAG), `suspended` (MARKETSUSPENDEDFLAG) | DISPATCH PRICE, event region and span |
+/// | `intervention` | `yes`: an intervention pricing run (direction or RERT) in the window | DISPATCH PRICE INTERVENTION = 1 rows |
+/// | `settlement` | `5-minute` (from 1 Oct 2021, 04:00), `30-minute` | event start |
+/// | `bids` | `missing` (no daily bids), `no-band-availability` (no per-period bids) | which bid tables the record holds |
+pub const TAG_KEYS: &[&str] = &[
+    "year",
+    "season",
+    "region",
+    "severity",
+    "price",
+    "pricing",
+    "intervention",
+    "settlement",
+    "bids",
+];
+
+/// The market price cap ($/MWh) in force at an interval end, by financial
+/// year (AEMC Schedule of Reliability Settings). A financial year starts
+/// with the interval ending 1 July 00:05.
+pub fn market_price_cap(t: chrono::NaiveDateTime) -> f64 {
+    use chrono::Datelike;
+    let t = t - chrono::Duration::minutes(5);
+    let fy = if t.month() >= 7 {
+        t.year()
+    } else {
+        t.year() - 1
+    };
+    match fy {
+        ..=2018 => 14_500.0,
+        2019 => 14_700.0,
+        2020 => 15_000.0,
+        2021 => 15_100.0,
+        2022 => 15_500.0,
+        2023 => 16_600.0,
+        2024 => 17_500.0,
+        2025 => 20_300.0,
+        _ => 23_200.0,
+    }
+}
+
+/// The southern-hemisphere season of a month: summer is December to
+/// February.
+pub fn season(month: u32) -> &'static str {
+    match month {
+        12 | 1 | 2 => "summer",
+        3..=5 => "autumn",
+        6..=8 => "winter",
+        _ => "spring",
+    }
+}
+
+/// Five-minute settlement started with the trading day of 1 October 2021
+/// (the interval ending 04:05).
+pub fn five_minute_settlement(t: chrono::NaiveDateTime) -> bool {
+    t > chrono::NaiveDate::from_ymd_opt(2021, 10, 1)
+        .and_then(|d| d.and_hms_opt(4, 0, 0))
+        .expect("valid date")
+}
+
 /// The fuel name used in public files for an AEMO CO2E_ENERGY_SOURCE
 /// (MMSDM GENUNITS): coal, gas, liquid, hydro, wind, solar, battery,
 /// bioenergy or other; `None` when blank.
@@ -490,6 +562,7 @@ mod tests {
             intervals_above_5000: 11,
             cost_to_load: 99.4e6,
             max_demand_mw: 9_000.0,
+            tags: vec!["year:2026".into(), "season:spring".into()],
             baseline_mean_price: Some(8_614.22),
             scenarios: Some(vec![ScenarioChange {
                 name: "coal back".into(),
@@ -549,6 +622,25 @@ END OF REPORT
             .starts_with("Inter-regional transfer limit variation"));
         assert!(n.reason.contains("unplanned outage of Bendigo"));
         assert!(!n.reason.contains("END OF REPORT"));
+    }
+
+    #[test]
+    fn caps_seasons_and_settlement() {
+        let t = |s: &str| crate::time::parse_market(s).unwrap();
+        assert_eq!(market_price_cap(t("2020/06/30 23:55:00")), 14_700.0);
+        assert_eq!(market_price_cap(t("2020/07/01 00:05:00")), 15_000.0);
+        assert_eq!(market_price_cap(t("2026/10/12 14:20:00")), 23_200.0);
+        assert_eq!(season(12), "summer");
+        assert_eq!(season(6), "winter");
+        assert_eq!(season(9), "spring");
+        assert!(!five_minute_settlement(t("2021/10/01 04:00:00")));
+        assert!(five_minute_settlement(t("2021/10/01 04:05:00")));
+        // Older headlines without tags still parse.
+        let old = r#"{"schema":2,"event_id":"x","region":"NSW1","trading_day":"d","start":"s","end":"e",
+            "duration_minutes":5,"peak_price":1,"peak_at":"s","mean_price":1,"intervals_above_5000":0,
+            "cost_to_load":1,"max_demand_mw":1}"#;
+        let h: Headline = serde_json::from_str(old).unwrap();
+        assert!(h.tags.is_empty());
     }
 
     #[test]
