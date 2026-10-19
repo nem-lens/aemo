@@ -212,9 +212,48 @@ fn period(r: &Record, col: &str) -> Result<u16> {
     Ok(p)
 }
 
+/// The first trading day of five-minute settlement. Before it, BIDPEROFFER
+/// rows are per 30-minute trading interval (PERIODID 1 to 48, no PERIODIDTO).
+fn five_minute_day() -> NaiveDate {
+    NaiveDate::from_ymd_opt(2021, 10, 1).expect("valid date")
+}
+
+/// A time from the first of `cols` present: the sparse table and the older
+/// BIDPEROFFER table name the same fields differently.
+fn time_of(r: &Record, cols: &[&str]) -> Result<NaiveDateTime> {
+    let col = cols
+        .iter()
+        .find(|c| r.text(c).is_some())
+        .copied()
+        .unwrap_or(cols[0]);
+    time(r, col)
+}
+
+/// The five-minute periods a row covers. A BIDPEROFFER row has PERIODID
+/// alone: one period, or before five-minute settlement one 30-minute
+/// trading interval, which is six five-minute periods.
+fn periods(r: &Record, day: NaiveDate) -> Result<(u16, u16)> {
+    if r.text("PERIODIDTO").is_some() {
+        return Ok((period(r, "PERIODID")?, period(r, "PERIODIDTO")?));
+    }
+    if day >= five_minute_day() {
+        let p = period(r, "PERIODID")?;
+        return Ok((p, p));
+    }
+    let p: u16 = required(r, "PERIODID")?
+        .parse()
+        .with_context(|| format!("{} PERIODID is not a period", r.key))?;
+    anyhow::ensure!(
+        (1..=PERIODS_PER_DAY / 6).contains(&p),
+        "{} PERIODID {p} is out of range for 30-minute periods",
+        r.key
+    );
+    Ok(((p - 1) * 6 + 1, p * 6))
+}
+
 fn period_offer(r: &Record) -> Result<PeriodOffer> {
-    let period_from = period(r, "PERIODID")?;
-    let period_to = period(r, "PERIODIDTO")?;
+    let trading_date = time_of(r, &["TRADINGDATE", "SETTLEMENTDATE"])?.date();
+    let (period_from, period_to) = periods(r, trading_date)?;
     anyhow::ensure!(
         period_from <= period_to,
         "{} PERIODID {period_from} is after PERIODIDTO {period_to}",
@@ -224,8 +263,8 @@ fn period_offer(r: &Record) -> Result<PeriodOffer> {
         duid: required(r, "DUID")?.to_string(),
         bid_type: required(r, "BIDTYPE")?.to_string(),
         direction: Direction::parse(r.get("DIRECTION")),
-        trading_date: time(r, "TRADINGDATE")?.date(),
-        offer_time: time(r, "OFFERDATETIME")?,
+        trading_date,
+        offer_time: time_of(r, &["OFFERDATETIME", "OFFERDATE"])?,
         period_from,
         period_to,
         max_avail: r.num("MAXAVAIL"),
@@ -360,6 +399,27 @@ D,BIDS,BIDOFFERPERIOD_SPARSE,2,U1,ENERGY,2026/10/16 00:00:00,2026/10/15 12:00:00
         assert_eq!(o.periods[1].period_from, 121);
         assert_eq!(o.periods[2].band_avail[9], 80.0);
         assert_eq!(o.day[0].version_no, Some(1));
+    }
+
+    #[test]
+    fn half_hour_bidperoffer_rows_cover_six_periods() {
+        // Before five-minute settlement: BIDPEROFFER names its fields
+        // differently and has one row per 30-minute trading interval.
+        let old = "I,BIDS,BIDOFFERPERIOD_SPARSE,1,DUID,BIDTYPE,SETTLEMENTDATE,OFFERDATE,PERIODID,MAXAVAIL,BANDAVAIL1,BANDAVAIL2,BANDAVAIL3,BANDAVAIL4,BANDAVAIL5,BANDAVAIL6,BANDAVAIL7,BANDAVAIL8,BANDAVAIL9,BANDAVAIL10
+D,BIDS,BIDOFFERPERIOD_SPARSE,1,U1,ENERGY,2020/01/31 00:00:00,2020/01/30 12:00:00.000,22,100,100,0,0,0,0,0,0,0,0,0
+";
+        let o = read_offers(old.as_bytes(), &OfferFilter::default()).unwrap();
+        let p = &o.periods[0];
+        assert_eq!((p.period_from, p.period_to), (127, 132));
+        assert_eq!(p.offer_time, t("2020/01/30 12:00:00"));
+        assert_eq!(
+            p.trading_date,
+            NaiveDate::from_ymd_opt(2020, 1, 31).unwrap()
+        );
+        // From five-minute settlement, a lone PERIODID is one period.
+        let new = old.replace("2020/01/31", "2021/10/01");
+        let o = read_offers(new.as_bytes(), &OfferFilter::default()).unwrap();
+        assert_eq!((o.periods[0].period_from, o.periods[0].period_to), (22, 22));
     }
 
     #[test]

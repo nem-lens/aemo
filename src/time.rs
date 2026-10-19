@@ -33,6 +33,9 @@ pub fn iso_market(t: NaiveDateTime) -> String {
 pub fn parse_market(s: &str) -> Option<NaiveDateTime> {
     let s = s.trim().trim_matches('"');
     NaiveDateTime::parse_from_str(s, "%Y/%m/%d %H:%M:%S")
+        // The MMSDM archive writes some offer times with milliseconds
+        // (`2024/08/01 05:06:39.000`) from August 2024.
+        .or_else(|_| NaiveDateTime::parse_from_str(s, "%Y/%m/%d %H:%M:%S%.f"))
         .or_else(|_| NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S"))
         .or_else(|_| {
             NaiveDateTime::parse_from_str(s.trim_end_matches("+10:00"), "%Y-%m-%dT%H:%M:%S")
@@ -89,6 +92,11 @@ mod tests {
 
     fn t(s: &str) -> NaiveDateTime {
         parse_market(s).unwrap()
+    }
+
+    #[test]
+    fn archive_times_with_milliseconds_parse() {
+        assert_eq!(t("2024/08/01 05:06:39.000"), t("2024/08/01 05:06:39"));
     }
 
     #[test]
