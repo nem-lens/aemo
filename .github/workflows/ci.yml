@@ -31,6 +31,17 @@ jobs:
       - run: cargo clippy --all-targets --locked
       - run: cargo test --locked
 
+  docs:
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo doc --no-deps --locked
+      - run: cargo package --locked
+
   wasm:
     runs-on: ubuntu-latest
     steps:

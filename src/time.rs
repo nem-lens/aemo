@@ -7,10 +7,12 @@
 use chrono::{DateTime, Duration, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
 use chrono_tz::Tz;
 
+/// The market's fixed offset, UTC+10.
 pub fn market_offset() -> FixedOffset {
     FixedOffset::east_opt(10 * 3600).expect("valid offset")
 }
 
+/// The UTC instant of a market time.
 pub fn to_utc(market: NaiveDateTime) -> DateTime<Utc> {
     market_offset()
         .from_local_datetime(&market)
@@ -30,6 +32,15 @@ pub fn iso_market(t: NaiveDateTime) -> String {
 }
 
 /// Parse AEMO ("2026/10/12 14:35:00", optionally quoted) or ISO market time.
+///
+/// ```
+/// use nem_lens_aemo::time::{iso_market, parse_market};
+///
+/// let t = parse_market("\"2026/10/12 14:35:00\"").unwrap();
+/// assert_eq!(iso_market(t), "2026-10-12T14:35:00+10:00");
+/// assert_eq!(parse_market("2026-10-12T14:35:00+10:00"), Some(t));
+/// assert_eq!(parse_market("12/10/2026"), None);
+/// ```
 pub fn parse_market(s: &str) -> Option<NaiveDateTime> {
     let s = s.trim().trim_matches('"');
     NaiveDateTime::parse_from_str(s, "%Y/%m/%d %H:%M:%S")
@@ -45,6 +56,14 @@ pub fn parse_market(s: &str) -> Option<NaiveDateTime> {
 
 /// The NEM trading day runs 04:00 to 04:00. The interval ending 04:00 belongs
 /// to the previous day.
+///
+/// ```
+/// use nem_lens_aemo::time::{parse_market, trading_day};
+///
+/// let day = |s| trading_day(parse_market(s).unwrap()).to_string();
+/// assert_eq!(day("2026/10/13 04:00:00"), "2026-10-12");
+/// assert_eq!(day("2026/10/13 04:05:00"), "2026-10-13");
+/// ```
 pub fn trading_day(interval_end: NaiveDateTime) -> NaiveDate {
     let four = NaiveTime::from_hms_opt(4, 0, 0).expect("valid time");
     if interval_end.time() <= four {
@@ -54,6 +73,8 @@ pub fn trading_day(interval_end: NaiveDateTime) -> NaiveDate {
     }
 }
 
+/// The local time zone of a NEM region (REGIONID, e.g. "SA1"). Unknown
+/// regions get Brisbane, which matches market time.
 pub fn region_tz(region: &str) -> Tz {
     match region {
         "NSW1" => chrono_tz::Australia::Sydney,
@@ -64,6 +85,8 @@ pub fn region_tz(region: &str) -> Tz {
     }
 }
 
+/// A region's name for the public, e.g. "South Australia" for "SA1".
+/// Unknown IDs are returned as given.
 pub fn region_name(region: &str) -> &str {
     match region {
         "NSW1" => "NSW",
@@ -76,11 +99,20 @@ pub fn region_name(region: &str) -> &str {
 }
 
 /// Local clock time for the public, e.g. "3:35pm AEDT".
+///
+/// ```
+/// use nem_lens_aemo::time::{local_label, parse_market};
+///
+/// let t = parse_market("2026/10/12 14:30:00").unwrap();
+/// assert_eq!(local_label(t, "NSW1"), "3:30pm AEDT");
+/// assert_eq!(local_label(t, "QLD1"), "2:30pm AEST");
+/// ```
 pub fn local_label(t: NaiveDateTime, region: &str) -> String {
     let local = to_utc(t).with_timezone(&region_tz(region));
     local.format("%-I:%M%P %Z").to_string()
 }
 
+/// Local date for the public, e.g. "Mon 12 Oct 2026".
 pub fn local_date_label(t: NaiveDateTime, region: &str) -> String {
     let local = to_utc(t).with_timezone(&region_tz(region));
     local.format("%a %-d %b %Y").to_string()

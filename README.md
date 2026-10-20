@@ -13,6 +13,10 @@ bytes and pass them in, so results are deterministic and the crate builds for
 | `dispatch` | Typed DispatchIS snapshots: prices, region totals, constraints, interconnectors (pricing run only) |
 | `time` | Market time (AEST, UTC+10, interval end), the 04:00 trading day, regional local clocks |
 | `files` | NEMWeb file name patterns (DispatchIS, Next_Day_*, Bidmove_*) and unzipping with a per-member size limit |
+| `bids` | Typed offers from next-day offer files, and the version in force for an interval |
+| `event` | The NEM Lens event record schema, each file and field public or private, and the gate for the public library |
+
+API documentation, with examples, is on [docs.rs](https://docs.rs/nem-lens-aemo).
 
 ```rust
 let members = nem_lens_aemo::files::unzip_csvs(&zip_bytes)?;

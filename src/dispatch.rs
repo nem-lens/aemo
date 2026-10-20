@@ -1,4 +1,14 @@
 //! Typed DispatchIS snapshots.
+//!
+//! AEMO publishes a DispatchIS report for every five-minute dispatch
+//! interval. It holds the regional prices (DISPATCH,PRICE), region totals
+//! (DISPATCH,REGIONSUM), generic constraints (DISPATCH,CONSTRAINT) and
+//! interconnector flows and limits (DISPATCH,INTERCONNECTORRES).
+//!
+//! When AEMO intervenes in the market (a direction or RERT), each table
+//! carries two runs: the pricing run (INTERVENTION = 0), which sets the
+//! published price, and the intervention run, which sets physical dispatch.
+//! Only the pricing run is read here.
 
 use std::collections::BTreeMap;
 
@@ -13,34 +23,57 @@ use crate::report::{Fields, Table, Tables};
 pub struct DispatchSnapshot {
     /// Interval end, market time.
     pub settlement: NaiveDateTime,
+    /// Each priced region by REGIONID, e.g. "NSW1".
     pub regions: BTreeMap<String, RegionInterval>,
+    /// Generic constraints invoked in the interval.
     pub constraints: Vec<ConstraintRow>,
+    /// Every interconnector's flow and limits.
     pub interconnectors: Vec<InterconnectorRow>,
 }
 
+/// One region's figures for an interval (DISPATCH,PRICE and REGIONSUM).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RegionInterval {
+    /// Regional reference price (RRP), $/MWh.
     pub rrp: f64,
+    /// TOTALDEMAND, MW: scheduled and semi-scheduled demand.
     pub demand: Option<f64>,
+    /// AVAILABLEGENERATION, MW.
     pub available_gen: Option<f64>,
+    /// NETINTERCHANGE, MW, positive for net export.
     pub net_interchange: Option<f64>,
 }
 
+/// One generic constraint in an interval (DISPATCH,CONSTRAINT).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ConstraintRow {
+    /// CONSTRAINTID, e.g. "N::N_CNCW_2".
     pub id: String,
+    /// The constraint's right-hand side, in its units (MW for most).
     pub rhs: Option<f64>,
+    /// The left-hand side as dispatched.
     pub lhs: Option<f64>,
+    /// MARGINALVALUE, $/MWh: the cost of the constraint to the market. Zero
+    /// when it does not bind.
     pub marginal: f64,
+    /// VIOLATIONDEGREE: how far dispatch fell short of meeting the
+    /// constraint. Zero when it was met.
     pub violation: f64,
 }
 
+/// One interconnector in an interval (DISPATCH,INTERCONNECTORRES).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct InterconnectorRow {
+    /// INTERCONNECTORID, e.g. "VIC1-NSW1".
     pub id: String,
+    /// MWFLOW, MW, positive in the interconnector's nominal direction (see
+    /// [`crate::event::interconnector_ends`]).
     pub flow: f64,
+    /// EXPORTLIMIT, MW: the upper bound on `flow`.
     pub export_limit: Option<f64>,
+    /// IMPORTLIMIT, MW: the lower bound on `flow`, usually negative.
     pub import_limit: Option<f64>,
+    /// MARGINALVALUE, $/MWh: non-zero when a limit binds.
     pub marginal: f64,
 }
 
@@ -57,7 +90,13 @@ pub fn is_pricing_row(r: &impl Fields) -> bool {
     r.text("INTERVENTION").is_none_or(|v| v == "0")
 }
 
-/// Extract prices, region totals, constraints and interconnectors from a DispatchIS report.
+/// Extract prices, region totals, constraints and interconnectors from a
+/// DispatchIS report, as parsed by [`crate::parse_report`].
+///
+/// # Errors
+///
+/// If the report has no DISPATCH,PRICE table, or no pricing-run price with a
+/// region and settlement date.
 pub fn dispatch_snapshot(tables: &Tables) -> Result<DispatchSnapshot> {
     let price = tables
         .get("DISPATCH_PRICE")
@@ -77,7 +116,13 @@ pub fn dispatch_snapshot(tables: &Tables) -> Result<DispatchSnapshot> {
 }
 
 /// [`dispatch_snapshot`] from one interval's rows of DISPATCH,PRICE,
-/// REGIONSUM, CONSTRAINT and INTERCONNECTORRES.
+/// REGIONSUM, CONSTRAINT and INTERCONNECTORRES, from any source of
+/// [`Fields`]. Intervention-run rows are skipped, and the settlement time is
+/// the latest among the prices.
+///
+/// # Errors
+///
+/// If no pricing-run price row has a region, price and settlement date.
 pub fn snapshot_from<F: Fields>(
     price: impl IntoIterator<Item = F>,
     regionsum: impl IntoIterator<Item = F>,

@@ -1,5 +1,18 @@
 //! NEMWeb file names and archives. Listings may be HTML or plain text; names
 //! are found anywhere in the text.
+//!
+//! ```
+//! use nem_lens_aemo::files::{dispatch_file_interval, dispatch_files};
+//!
+//! let listing = r#"<a href="/Reports/Current/DispatchIS_Reports/PUBLIC_DISPATCHIS_202610170955_0000000543328677.zip">"#;
+//! let files = dispatch_files(listing);
+//! assert_eq!(files, ["PUBLIC_DISPATCHIS_202610170955_0000000543328677.zip"]);
+//! let end = dispatch_file_interval(&files[0]).unwrap();
+//! assert_eq!(end.to_string(), "2026-10-17 09:55:00");
+//! ```
+//!
+//! Zips are read with a per-member size limit, enforced while reading, so a
+//! malformed or hostile archive can't exhaust memory.
 
 use std::io::{Cursor, Read};
 use std::sync::OnceLock;

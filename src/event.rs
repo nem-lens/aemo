@@ -1,16 +1,14 @@
 //! The NEM Lens event record: one schema for everything kept about an
 //! event, with every file and field tagged public or private.
 //!
-//! The public event library (`nem-lens/library`, the replay dashboard) is a
-//! view of the record: only what is directly derived from AEMO's published
+//! The public [event library](https://nem-lens.github.io/library/) is a view
+//! of the record: only what is directly derived from AEMO's published
 //! figures, for real events. The full record adds the AEMO tables as
-//! fetched, kept in the private store that cf-report reads.
-//! [`check_public_file`] is the gate the publisher runs on every file before
-//! it reaches the library.
+//! fetched, kept in a private store. [`check_public_file`] is the gate the
+//! publisher runs on every file before it reaches the library.
 //!
-//! Nothing the engine computes is stored anywhere (owner, 19 Oct 2026): the
-//! replay, counterfactuals and attribution are computed on the user's own
-//! machine, in WebAssembly, from the stored record.
+//! Model output is never stored in a record; it is computed from the record
+//! on the reader's own machine.
 //!
 //! ```text
 //! events/<id>/headline.json          public   AEMO headline (private fields stripped)
@@ -24,9 +22,24 @@
 //! events/<id>/bundle/...             private  AEMO tables as fetched and market notices (engine inputs, not displayed)
 //! ```
 //!
-//! The headline's engine fields are computed, never stored; they are private
-//! pending the owner's long-term decision on a third public page for the
-//! model baseline, and making them public is a change of tag here.
+//! The headline's model fields ([`Headline::baseline_mean_price`] and
+//! [`Headline::scenarios`]) are private; [`Headline::public_view`] strips
+//! them.
+//!
+//! # Example
+//!
+//! ```
+//! use nem_lens_aemo::event::check_public_file;
+//!
+//! let series = br#"{"schema":2,"intervals":[],"regions":{}}"#;
+//! assert!(check_public_file("series.json", series).is_ok());
+//!
+//! // Private paths, unknown files and private fields are refused.
+//! assert!(check_public_file("bundle/unit_dispatch.parquet", b"").is_err());
+//! assert!(check_public_file("notes.json", b"{}").is_err());
+//! let leaky = br#"{"schema":2,"notices":[],"baseline":{}}"#;
+//! assert!(check_public_file("notices.json", leaky).is_err());
+//! ```
 
 use std::collections::BTreeMap;
 
@@ -37,6 +50,7 @@ use serde::{Deserialize, Serialize};
 /// with replay figures in the headline.
 pub const SCHEMA: u32 = 2;
 
+/// Where a file or field of the record may appear.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Visibility {
@@ -50,10 +64,13 @@ pub enum Visibility {
 /// One file (or folder, when `path` ends in `/`) of an event record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FileSpec {
+    /// Path relative to `events/<id>/`.
     pub path: &'static str,
+    /// Public or private.
     pub visibility: Visibility,
     /// What writes it.
     pub producer: &'static str,
+    /// What it holds, in a few words.
     pub contents: &'static str,
 }
 
@@ -147,17 +164,24 @@ pub const PRIVATE_KEYS: &[&str] = &[
 /// The headline of an event. Private fields are `None` in the library.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Headline {
+    /// [`SCHEMA`].
     pub schema: u32,
+    /// The event's ID: start time, region and kind, e.g.
+    /// "202610121420-NSW1-high".
     pub event_id: String,
+    /// The event region's REGIONID.
     pub region: String,
+    /// The trading day of the start, `YYYY-MM-DD`.
     pub trading_day: String,
-    /// First and last interval end of the event span, market time with
-    /// offset.
+    /// First interval end of the event span, market time with offset.
     pub start: String,
+    /// Last interval end of the span.
     pub end: String,
+    /// Five minutes per interval in the span.
     pub duration_minutes: u32,
-    /// Highest AEMO regional price in the span, $/MWh, and when.
+    /// Highest AEMO regional price in the span, $/MWh.
     pub peak_price: f64,
+    /// The interval end of the peak.
     pub peak_at: String,
     /// Mean AEMO regional price over the span, $/MWh.
     pub mean_price: f64,
@@ -165,6 +189,7 @@ pub struct Headline {
     pub intervals_above_5000: u32,
     /// Sum of AEMO price x AEMO demand (TOTALDEMAND) over the span, $.
     pub cost_to_load: f64,
+    /// Highest TOTALDEMAND in the span, MW.
     pub max_demand_mw: f64,
     /// Facets for browsing, `key:value`, derived from AEMO data only (see
     /// [`TAG_KEYS`]). Absent in files written before tags existed.
@@ -180,9 +205,12 @@ pub struct Headline {
     pub scenarios: Option<Vec<ScenarioChange>>,
 }
 
+/// Private: one scenario's effect on the event's mean price.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScenarioChange {
+    /// The scenario's name.
     pub name: String,
+    /// Its mean price less the baseline's, $/MWh.
     pub mean_price_change: f64,
 }
 
@@ -200,7 +228,9 @@ impl Headline {
 /// `index.json`: every event's public headline, newest first.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Index {
+    /// [`SCHEMA`].
     pub schema: u32,
+    /// Public headlines, newest first.
     pub events: Vec<Headline>,
 }
 
@@ -208,12 +238,16 @@ pub struct Index {
 /// REGIONSUM, pricing run).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Series {
+    /// [`SCHEMA`].
     pub schema: u32,
     /// Interval ends, market time with offset.
     pub intervals: Vec<String>,
+    /// Every region by REGIONID.
     pub regions: BTreeMap<String, RegionSeries>,
 }
 
+/// One region's figures in [`Series`], each aligned with
+/// [`Series::intervals`].
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RegionSeries {
     /// RRP, $/MWh.
@@ -258,8 +292,11 @@ pub fn is_dc_link(id: &str) -> bool {
 /// CO2E_ENERGY_SOURCE via DUALLOC).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Dispatch {
+    /// [`SCHEMA`].
     pub schema: u32,
+    /// The event region's REGIONID.
     pub region: String,
+    /// Interval ends, market time with offset.
     pub intervals: Vec<String>,
     /// Fuel to MW per interval; batteries net of charging.
     pub fuels: BTreeMap<String, Vec<f64>>,
@@ -268,25 +305,37 @@ pub struct Dispatch {
 /// `interconnectors.json` (DISPATCH INTERCONNECTORRES).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Interconnectors {
+    /// [`SCHEMA`].
     pub schema: u32,
+    /// Interval ends, market time with offset.
     pub intervals: Vec<String>,
+    /// Every interconnector.
     pub interconnectors: Vec<InterconnectorSeries>,
 }
 
+/// One interconnector in [`Interconnectors`], each series aligned with its
+/// intervals.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct InterconnectorSeries {
+    /// INTERCONNECTORID, e.g. "VIC1-NSW1".
     pub id: String,
+    /// The region positive flow leaves.
     pub from_region: String,
+    /// The region positive flow enters.
     pub to_region: String,
     /// MWFLOW (the dispatch target the limits apply to), MW, positive from
     /// `from_region`.
     pub flow: Vec<Option<f64>>,
-    /// IMPORTLIMIT and EXPORTLIMIT, MW, with AEMO's signs (the import limit
-    /// is the bound in the negative direction).
+    /// IMPORTLIMIT, MW, with AEMO's sign: the bound on `flow` in the
+    /// negative direction. An import limit above zero forces flow from
+    /// `from_region`.
     pub import_limit: Vec<Option<f64>>,
+    /// EXPORTLIMIT, MW: the bound in the positive direction. An export
+    /// limit below zero forces flow into `from_region`.
     pub export_limit: Vec<Option<f64>>,
-    /// IMPORTGENCONID and EXPORTGENCONID: the constraint setting each limit.
+    /// IMPORTGENCONID: the constraint setting the import limit.
     pub import_set_by: Vec<Option<String>>,
+    /// EXPORTGENCONID: the constraint setting the export limit.
     pub export_set_by: Vec<Option<String>>,
 }
 
@@ -295,13 +344,19 @@ pub struct InterconnectorSeries {
 /// GENCONDATA.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Constraints {
+    /// [`SCHEMA`].
     pub schema: u32,
+    /// Interval ends, market time with offset.
     pub intervals: Vec<String>,
+    /// Constraints that bound or were violated.
     pub constraints: Vec<ConstraintSeries>,
 }
 
+/// One generic constraint in [`Constraints`], each series aligned with its
+/// intervals.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ConstraintSeries {
+    /// CONSTRAINTID.
     pub id: String,
     /// AEMO's description, e.g. "Out = Canberra-Capital (6) line, ...".
     pub description: String,
@@ -322,15 +377,22 @@ pub struct ConstraintSeries {
 /// capacity in the window.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Unavailability {
+    /// [`SCHEMA`].
     pub schema: u32,
+    /// Interval ends, market time with offset.
     pub intervals: Vec<String>,
+    /// Units out or derated.
     pub units: Vec<UnitAvailability>,
 }
 
+/// One unit in [`Unavailability`].
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct UnitAvailability {
+    /// The dispatchable unit ID.
     pub duid: String,
+    /// The unit's REGIONID.
     pub region: String,
+    /// Its fuel, as [`fuel_of`] names it.
     pub fuel: Option<String>,
     /// MAXCAPACITY from DUDETAILSUMMARY or GENUNITS, MW.
     pub capacity_mw: f64,
@@ -343,21 +405,28 @@ pub struct UnitAvailability {
     pub rebids: Vec<Rebid>,
 }
 
+/// A rebid in force during an event.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Rebid {
+    /// When it was submitted, market time with offset.
     pub offer_time: String,
+    /// AEMO's REBIDEXPLANATION, as the participant wrote it.
     pub explanation: String,
 }
 
 /// `notices.json`: AEMO market notices issued in the window.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Notices {
+    /// [`SCHEMA`].
     pub schema: u32,
+    /// Notices, as published.
     pub notices: Vec<Notice>,
 }
 
+/// One AEMO market notice.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Notice {
+    /// The notice ID, e.g. "145591".
     pub id: String,
     /// Notice type, e.g. "RESERVE NOTICE" or "INTER-REGIONAL TRANSFER".
     pub kind: String,
@@ -482,7 +551,14 @@ pub fn interconnector_ends(id: &str) -> Option<(&'static str, &'static str)> {
 }
 
 /// Whether an AEMO constraint description marks a network outage
-/// ("Out = <element>") rather than system normal ("Out = Nil").
+/// ("Out = *element*") rather than system normal ("Out = Nil").
+///
+/// ```
+/// use nem_lens_aemo::event::is_outage_description;
+///
+/// assert!(is_outage_description("Out = Canberra-Capital (6) line"));
+/// assert!(!is_outage_description("Out= Nil, Limit Heywood flows"));
+/// ```
 pub fn is_outage_description(description: &str) -> bool {
     let d = description.trim_start();
     let Some(rest) = d

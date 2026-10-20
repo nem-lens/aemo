@@ -5,6 +5,13 @@ edition = "2021"
 description = "Pure parsers for AEMO NEMWeb reports: C/I/D CSV tables, DispatchIS snapshots, market time and file names"
 license = "BSD-3-Clause"
 repository = "https://github.com/nem-lens/aemo"
+documentation = "https://docs.rs/nem-lens-aemo"
+readme = "README.md"
+keywords = ["aemo", "nem", "electricity", "energy-market", "parser"]
+categories = ["parser-implementations", "science", "wasm"]
+# The tests read real AEMO files, which stay in the repository under AEMO's
+# terms and are not shipped in the package.
+exclude = ["/tests", "/.github", "/.gitattributes"]
 
 [dependencies]
 anyhow = "1"

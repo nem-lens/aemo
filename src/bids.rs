@@ -15,6 +15,48 @@
 //!
 //! Period 1 is the interval ending 04:05 on the trading date; period 288 ends
 //! at 04:00 the next morning.
+//!
+//! Files from before five-minute settlement (1 October 2021) use the older
+//! `BIDPEROFFER` field names and one row per 30-minute trading interval;
+//! [`read_offers`] reads both and reports every row in five-minute periods.
+//!
+//! # Example
+//!
+//! Find the offer in force for one unit and interval. In practice the CSV
+//! is streamed from the day's zip with [`crate::files::visit_csvs`].
+//!
+//! ```
+//! use nem_lens_aemo::bids::{read_offers, Direction, OfferFilter};
+//! use nem_lens_aemo::time::parse_market;
+//!
+//! # fn main() -> anyhow::Result<()> {
+//! let csv = "\
+//! I,BIDS,BIDDAYOFFER,1,DUID,BIDTYPE,SETTLEMENTDATE,OFFERDATE,PRICEBAND1,PRICEBAND2,PRICEBAND3,PRICEBAND4,PRICEBAND5,PRICEBAND6,PRICEBAND7,PRICEBAND8,PRICEBAND9,PRICEBAND10
+//! D,BIDS,BIDDAYOFFER,1,U1,ENERGY,2026/10/16 00:00:00,2026/10/15 12:00:00,-1000,0,1,2,3,4,5,6,7,20000
+//! D,BIDS,BIDDAYOFFER,1,U1,ENERGY,2026/10/16 00:00:00,2026/10/16 14:00:00,-1000,0,1,2,3,4,5,6,7,15000
+//! I,BIDS,BIDOFFERPERIOD_SPARSE,2,DUID,BIDTYPE,TRADINGDATE,OFFERDATETIME,PERIODID,PERIODIDTO,MAXAVAIL,BANDAVAIL1,BANDAVAIL2,BANDAVAIL3,BANDAVAIL4,BANDAVAIL5,BANDAVAIL6,BANDAVAIL7,BANDAVAIL8,BANDAVAIL9,BANDAVAIL10
+//! D,BIDS,BIDOFFERPERIOD_SPARSE,2,U1,ENERGY,2026/10/16 00:00:00,2026/10/15 12:00:00,1,288,100,100,0,0,0,0,0,0,0,0,0
+//! D,BIDS,BIDOFFERPERIOD_SPARSE,2,U1,ENERGY,2026/10/16 00:00:00,2026/10/16 14:00:00,1,288,80,0,0,0,0,0,0,0,0,0,80
+//! ";
+//! let offers = read_offers(csv.as_bytes(), &OfferFilter::default())?;
+//! let index = offers.index();
+//! let t = |s| parse_market(s).unwrap();
+//! let end = t("2026/10/16 14:35:00");
+//!
+//! // Before the 14:00 rebid, the first version is in force...
+//! let (day, period) = index
+//!     .effective("U1", "ENERGY", Direction::Gen, end, t("2026/10/16 13:30:00"))
+//!     .unwrap();
+//! assert_eq!((day.price_bands[9], period.max_avail), (20000.0, Some(100.0)));
+//!
+//! // ...and from its submission time, the rebid.
+//! let (day, period) = index
+//!     .effective("U1", "ENERGY", Direction::Gen, end, t("2026/10/16 14:30:00"))
+//!     .unwrap();
+//! assert_eq!((day.price_bands[9], period.max_avail), (15000.0, Some(80.0)));
+//! # Ok(())
+//! # }
+//! ```
 
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
@@ -25,13 +67,20 @@ use chrono::{Duration, NaiveDate, NaiveDateTime, NaiveTime};
 use crate::report::{visit_report, Fields};
 use crate::time::trading_day;
 
+/// Table key of the day offers: one row per offer version.
 pub const DAY_OFFER_TABLE: &str = "BIDS_BIDDAYOFFER";
+/// Table key of the period offers: quantities for runs of periods.
 pub const PERIOD_OFFER_TABLE: &str = "BIDS_BIDOFFERPERIOD_SPARSE";
+/// Five-minute periods in a trading day.
 pub const PERIODS_PER_DAY: u16 = 288;
 
+/// Which side of a unit an offer is for. Bidirectional units (batteries)
+/// offer each side separately.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Direction {
+    /// Generation (`GEN`).
     Gen,
+    /// Load (`LOAD`): consumption, such as a battery charging.
     Load,
 }
 
@@ -49,51 +98,80 @@ impl Direction {
 /// One offer version: `BIDS,BIDDAYOFFER`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DayOffer {
+    /// The dispatchable unit ID, e.g. "ER02".
     pub duid: String,
     /// ENERGY, or an FCAS service such as RAISE6SEC.
     pub bid_type: String,
+    /// Generation or load.
     pub direction: Direction,
+    /// The trading day the offer is for.
     pub trading_date: NaiveDate,
     /// When the version was submitted (market time).
     pub offer_time: NaiveDateTime,
+    /// VERSIONNO, where published.
     pub version_no: Option<u32>,
+    /// PARTICIPANTID: the registered participant making the offer.
     pub participant_id: String,
     /// $/MWh for bands 1 to 10.
     pub price_bands: [f64; 10],
+    /// DAILYENERGYCONSTRAINT, MWh: the most energy the unit will deliver
+    /// in the day.
     pub daily_energy_constraint: Option<f64>,
+    /// MINIMUMLOAD, MW.
     pub minimum_load: Option<f64>,
+    /// REBIDEXPLANATION: the participant's reason for a rebid, as written.
     pub rebid_explanation: String,
+    /// REBID_CATEGORY: the reason's category code, where given.
     pub rebid_category: String,
+    /// ENTRYTYPE: DAILY for the first offer, REBID for later versions.
     pub entry_type: String,
 }
 
 /// Quantities for a run of periods within one version: `BIDS,BIDOFFERPERIOD_SPARSE`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PeriodOffer {
+    /// The dispatchable unit ID.
     pub duid: String,
+    /// ENERGY, or an FCAS service such as RAISE6SEC.
     pub bid_type: String,
+    /// Generation or load.
     pub direction: Direction,
+    /// The trading day the offer is for.
     pub trading_date: NaiveDate,
     /// Matches [`DayOffer::offer_time`] of the version this row belongs to.
     pub offer_time: NaiveDateTime,
-    /// First and last period covered, inclusive (1 to 288).
+    /// First period covered, inclusive (1 to 288).
     pub period_from: u16,
+    /// Last period covered, inclusive.
     pub period_to: u16,
+    /// MAXAVAIL, MW: the unit's maximum availability.
     pub max_avail: Option<f64>,
+    /// FIXEDLOAD, MW: a fixed dispatch level, if the unit asked for one.
     pub fixed_load: Option<f64>,
+    /// RAMPUPRATE, MW per minute.
     pub ramp_up_rate: Option<f64>,
+    /// RAMPDOWNRATE, MW per minute.
     pub ramp_down_rate: Option<f64>,
+    /// ENABLEMENTMIN, MW (FCAS offers): the lowest output at which the
+    /// service is available.
     pub enablement_min: Option<f64>,
+    /// ENABLEMENTMAX, MW (FCAS offers): the highest such output.
     pub enablement_max: Option<f64>,
+    /// LOWBREAKPOINT, MW (FCAS offers): the lowest output at which the full
+    /// availability can be provided.
     pub low_breakpoint: Option<f64>,
+    /// HIGHBREAKPOINT, MW (FCAS offers): the highest such output.
     pub high_breakpoint: Option<f64>,
     /// MW available in bands 1 to 10.
     pub band_avail: [f64; 10],
+    /// PASAAVAILABILITY, MW: capacity available within 24 hours' notice.
     pub pasa_availability: Option<f64>,
+    /// ENERGYLIMIT, MWh, for units with limited energy (batteries).
     pub energy_limit: Option<f64>,
 }
 
 impl PeriodOffer {
+    /// Whether this row covers `period`.
     pub fn covers(&self, period: u16) -> bool {
         (self.period_from..=self.period_to).contains(&period)
     }
@@ -115,7 +193,9 @@ pub fn period_of(interval_end: NaiveDateTime) -> (NaiveDate, u16) {
 /// Which rows [`read_offers`] keeps. The default keeps everything.
 #[derive(Debug, Clone, Default)]
 pub struct OfferFilter {
+    /// Keep only these units (DUID).
     pub duids: Option<HashSet<String>>,
+    /// Keep only these services (BIDTYPE), e.g. "ENERGY".
     pub bid_types: Option<HashSet<String>>,
     /// Keep period rows overlapping this inclusive range of periods.
     pub periods: Option<(u16, u16)>,
@@ -136,15 +216,24 @@ impl OfferFilter {
     }
 }
 
+/// The offers kept from one or more next-day offer files.
 #[derive(Debug, Clone, Default)]
 pub struct Offers {
+    /// Day offers, one per version, in file order.
     pub day: Vec<DayOffer>,
+    /// Period offers, in file order.
     pub periods: Vec<PeriodOffer>,
 }
 
 /// Stream a next-day offer CSV and keep the offers that pass `filter`.
 /// Day offers are kept for every version of a kept unit, since choosing the
 /// version in force needs them all.
+///
+/// # Errors
+///
+/// If the CSV is malformed, or a kept row lacks a required field (unit,
+/// service, times, periods or any of the ten bands) or has a period out of
+/// range.
 pub fn read_offers<R: Read>(reader: R, filter: &OfferFilter) -> Result<Offers> {
     let mut out = Offers::default();
     visit_report(reader, |r| out.push(r, filter))?;
@@ -324,6 +413,7 @@ fn key(duid: &str, bid_type: &str, direction: Direction, day: NaiveDate) -> Unit
 }
 
 impl Offers {
+    /// Index the offers by unit and version, for [`OfferIndex::effective`].
     pub fn index(&self) -> OfferIndex<'_> {
         let mut versions: HashMap<UnitKey, Vec<&DayOffer>> = HashMap::new();
         for d in &self.day {

@@ -13,6 +13,25 @@
 //! through [`Fields`], so the same rules apply to a streamed [`Record`], a
 //! parsed [`Table`] row, or a row of typed columns held elsewhere (an event
 //! bundle's Parquet).
+//!
+//! ```
+//! use nem_lens_aemo::report::{parse_report, Fields};
+//!
+//! # fn main() -> anyhow::Result<()> {
+//! // Columns may arrive in any order; they are found by name.
+//! let csv = "\
+//! C,NEMP.WORLD,DISPATCHIS,AEMO,PUBLIC
+//! I,DISPATCH,PRICE,5,REGIONID,RRP
+//! D,DISPATCH,PRICE,5,SA1,-40.5
+//! ";
+//! let tables = parse_report(csv.as_bytes())?;
+//! let price = &tables["DISPATCH_PRICE"];
+//! let row = price.records("DISPATCH_PRICE").next().unwrap();
+//! assert_eq!(row.text("REGIONID").as_deref(), Some("SA1"));
+//! assert_eq!(row.num("RRP"), Some(-40.5));
+//! # Ok(())
+//! # }
+//! ```
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -43,6 +62,7 @@ pub trait Fields {
     }
 }
 
+/// One table of a report, held in memory as strings.
 #[derive(Debug, Default, Clone)]
 pub struct Table {
     /// Column names, upper-cased, without the four leading I-row fields.
@@ -55,14 +75,18 @@ pub struct Table {
 pub type Tables = HashMap<String, Table>;
 
 impl Table {
+    /// The position of column `name` (upper case), if present.
     pub fn idx(&self, name: &str) -> Option<usize> {
         self.columns.iter().position(|c| c == name)
     }
 
+    /// A field of `row` by column name, untrimmed, or `None` if the column
+    /// is absent.
     pub fn col<'a>(&self, row: &'a [String], name: &str) -> Option<&'a str> {
         self.idx(name).and_then(|i| row.get(i)).map(|s| s.as_str())
     }
 
+    /// A field of `row` as a number, or `None` if absent or not a number.
     pub fn num(&self, row: &[String], name: &str) -> Option<f64> {
         self.col(row, name)
             .and_then(|s| s.trim().parse::<f64>().ok())
@@ -80,8 +104,11 @@ impl Table {
 
 /// One row of a [`Table`], as [`Fields`].
 pub struct TableRow<'a> {
+    /// The table key, e.g. "DISPATCH_PRICE".
     pub key: &'a str,
+    /// The table the row belongs to, for its columns.
     pub table: &'a Table,
+    /// The row's fields, aligned with the table's columns.
     pub row: &'a [String],
 }
 
@@ -102,6 +129,7 @@ impl Fields for TableRow<'_> {
 /// A table's columns from its I row, with a name index for fast lookup.
 #[derive(Debug, Clone, Default)]
 pub struct Header {
+    /// Column names, upper-cased, without the four leading I-row fields.
     pub columns: Vec<String>,
     index: HashMap<String, usize>,
 }
@@ -116,6 +144,7 @@ impl Header {
         Self { columns, index }
     }
 
+    /// The position of column `name` (upper case), if present.
     pub fn idx(&self, name: &str) -> Option<usize> {
         self.index.get(name).copied()
     }
@@ -125,6 +154,7 @@ impl Header {
 pub struct Record<'a> {
     /// Table key, e.g. "BIDS_BIDOFFERPERIOD_SPARSE".
     pub key: &'a str,
+    /// The columns from the table's I row.
     pub header: &'a Header,
     fields: &'a csv::StringRecord,
 }
@@ -140,6 +170,7 @@ impl<'a> Record<'a> {
         self.get(name).map(str::trim).filter(|s| !s.is_empty())
     }
 
+    /// A field as a number, or `None` if absent, empty or not a number.
     pub fn num(&self, name: &str) -> Option<f64> {
         self.text(name).and_then(|s| s.parse().ok())
     }
@@ -215,6 +246,20 @@ fn scan<R: Read>(reader: R, mut on: impl FnMut(Event) -> Result<()>) -> Result<(
 }
 
 /// Call `f` for every D row, in file order, without collecting anything.
+/// An error from `f` stops the scan and is returned.
+///
+/// ```
+/// # fn main() -> anyhow::Result<()> {
+/// let csv = "I,DISPATCH,PRICE,5,REGIONID,RRP\nD,DISPATCH,PRICE,5,NSW1,99\nD,DISPATCH,PRICE,5,VIC1,85\n";
+/// let mut regions = Vec::new();
+/// nem_lens_aemo::visit_report(csv.as_bytes(), |r| {
+///     regions.push(r.text("REGIONID").unwrap_or_default().to_string());
+///     Ok(())
+/// })?;
+/// assert_eq!(regions, ["NSW1", "VIC1"]);
+/// # Ok(())
+/// # }
+/// ```
 pub fn visit_report<R: Read>(reader: R, mut f: impl FnMut(&Record) -> Result<()>) -> Result<()> {
     scan(reader, |e| match e {
         Event::Header(..) => Ok(()),
