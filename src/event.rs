@@ -291,7 +291,8 @@ pub struct InterconnectorSeries {
 }
 
 /// `constraints.json`: generic constraints with a non-zero AEMO marginal
-/// value in the window (DISPATCH CONSTRAINT), described from GENCONDATA.
+/// value or a violation in the window (DISPATCH CONSTRAINT), described from
+/// GENCONDATA.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Constraints {
     pub schema: u32,
@@ -310,6 +311,11 @@ pub struct ConstraintSeries {
     pub marginal: Vec<Option<f64>>,
     /// Intervals with a non-zero marginal value.
     pub intervals_binding: u32,
+    /// VIOLATIONDEGREE per interval, in the constraint's units (MW for
+    /// most): how far dispatch fell short of meeting it. None when not
+    /// invoked or not violated. Absent in files written before it existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub violation: Vec<Option<f64>>,
 }
 
 /// `unavailability.json`: units whose AEMO availability fell short of their
