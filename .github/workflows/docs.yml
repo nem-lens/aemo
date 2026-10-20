@@ -1,0 +1,38 @@
+name: Docs
+
+# API docs (rustdoc) for GitHub Pages, at https://nem-lens.github.io/aemo/.
+# Needs Settings > Pages > Source: GitHub Actions.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo doc --no-deps --locked
+        env:
+          RUSTDOCFLAGS: -D warnings
+      - run: echo '<!doctype html><meta http-equiv="refresh" content="0; url=nem_lens_aemo/">' > target/doc/index.html
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: target/doc
+      - id: deploy
+        uses: actions/deploy-pages@v4

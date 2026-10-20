@@ -16,7 +16,8 @@ bytes and pass them in, so results are deterministic and the crate builds for
 | `bids` | Typed offers from next-day offer files, and the version in force for an interval |
 | `event` | The NEM Lens event record schema, each file and field public or private, and the gate for the public library |
 
-API documentation, with examples, is on [docs.rs](https://docs.rs/nem-lens-aemo).
+API documentation, with examples: https://nem-lens.github.io/aemo/nem_lens_aemo/
+(built by rustdoc from `main`).
 
 ```rust
 let members = nem_lens_aemo::files::unzip_csvs(&zip_bytes)?;
