@@ -15,7 +15,7 @@
 //! ```text
 //! events/<id>/headline.json          public   AEMO headline (private fields stripped)
 //! events/<id>/manifest.json          public   AEMO sources and SHA-256
-//! events/<id>/series.json            public   regional price, demand, availability per interval
+//! events/<id>/series.json            public   regional price, demand, availability, contingency reserve per interval
 //! events/<id>/dispatch.json          public   dispatch by fuel in the event region
 //! events/<id>/interconnectors.json   public   flows, AEMO limits and the constraints that set them
 //! events/<id>/constraints.json       public   binding constraints, AEMO marginal values and descriptions
@@ -77,7 +77,7 @@ pub const FILES: &[FileSpec] = &[
         path: "series.json",
         visibility: Public,
         producer: "monitor",
-        contents: "per interval and region: price, demand, available generation, net interchange",
+        contents: "per interval and region: price, demand, available generation, net interchange, contingency reserve ratio",
     },
     FileSpec {
         path: "dispatch.json",
@@ -224,6 +224,33 @@ pub struct RegionSeries {
     pub available_generation: Vec<Option<f64>>,
     /// NETINTERCHANGE (positive is export), MW.
     pub net_interchange: Vec<Option<f64>>,
+    /// Contingency reserve ratio (CRR): the region's largest single
+    /// contingency, a unit (DUID, TOTALCLEARED) or a DC link (Basslink,
+    /// Murraylink, Directlink: flow into the region), and the reserve left to
+    /// replace it: unit headroom (AVAILABILITY − TOTALCLEARED) plus the room
+    /// to raise imports to AEMO's interconnector limits, less the tripped
+    /// element's own headroom. CRR = reserve / contingency; below 1, the
+    /// region could not replace its largest loss. Arithmetic on AEMO figures
+    /// (DISPATCH UNIT_SOLUTION and INTERCONNECTORRES, pricing run); absent
+    /// in files written before it existed, or without next-day unit data.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contingency: Vec<Option<String>>,
+    /// The contingency's MW.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contingency_mw: Vec<Option<f64>>,
+    /// Reserve to replace it, MW.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reserve_mw: Vec<Option<f64>>,
+    /// reserve_mw / contingency_mw.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub crr: Vec<Option<f64>>,
+}
+
+/// Whether an interconnector is a DC link (an MNSP: Basslink, Murraylink,
+/// Directlink), which counts as a single contingency for the region it
+/// feeds.
+pub fn is_dc_link(id: &str) -> bool {
+    id.contains("MNSP")
 }
 
 /// `dispatch.json`: the event region's dispatch by fuel (DISPATCH
@@ -683,6 +710,10 @@ END OF REPORT
                 "NSW1".to_string(),
                 RegionSeries {
                     price: vec![Some(23_107.0)],
+                    contingency: vec![Some("T-V-MNSP1".into())],
+                    contingency_mw: vec![Some(478.0)],
+                    reserve_mw: vec![Some(239.0)],
+                    crr: vec![Some(0.5)],
                     ..RegionSeries::default()
                 },
             )]),
@@ -690,6 +721,16 @@ END OF REPORT
         let bytes = serde_json::to_vec(&s).unwrap();
         check_public_file("series.json", &bytes).unwrap();
         assert_eq!(serde_json::from_slice::<Series>(&bytes).unwrap(), s);
+    }
+
+    #[test]
+    fn series_written_before_crr_still_reads() {
+        let old = br#"{"schema":2,"intervals":["t"],"regions":{"SA1":{"price":[1.0],
+            "demand":[null],"available_generation":[null],"net_interchange":[null]}}}"#;
+        let s: Series = serde_json::from_slice(old).unwrap();
+        assert!(s.regions["SA1"].crr.is_empty());
+        assert!(!serde_json::to_string(&s).unwrap().contains("crr"));
+        assert!(is_dc_link("T-V-MNSP1") && !is_dc_link("V-SA"));
     }
 
     #[test]
