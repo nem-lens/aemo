@@ -283,7 +283,32 @@ pub struct RegionSeries {
     /// reserve_mw / contingency_mw.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub crr: Vec<Option<f64>>,
+    /// FCAS prices by service in [`FCAS_SERVICES`] (DISPATCHPRICE
+    /// `<service>RRP`), $/MW per hour. Only services AEMO priced in the
+    /// window appear: the 1-second services start on 9 Oct 2023. Absent in
+    /// files written before it existed.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub fcas_price: BTreeMap<String, Vec<Option<f64>>>,
+    /// FCAS enabled in the region by service (REGIONSUM
+    /// `<service>LOCALDISPATCH`), MW.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub fcas_enabled: BTreeMap<String, Vec<Option<f64>>>,
 }
+
+/// AEMO's FCAS services, as named in DISPATCHPRICE and REGIONSUM columns:
+/// raise then lower, fastest first, regulation last.
+pub const FCAS_SERVICES: [&str; 10] = [
+    "RAISE1SEC",
+    "RAISE6SEC",
+    "RAISE60SEC",
+    "RAISE5MIN",
+    "RAISEREG",
+    "LOWER1SEC",
+    "LOWER6SEC",
+    "LOWER60SEC",
+    "LOWER5MIN",
+    "LOWERREG",
+];
 
 /// Whether an interconnector is a DC link (an MNSP: Basslink, Murraylink,
 /// Directlink), which counts as a single contingency for the region it
@@ -801,6 +826,8 @@ END OF REPORT
                     contingency_mw: vec![Some(478.0)],
                     reserve_mw: vec![Some(239.0)],
                     crr: vec![Some(0.5)],
+                    fcas_price: BTreeMap::from([("RAISEREG".to_string(), vec![Some(17.0)])]),
+                    fcas_enabled: BTreeMap::from([("RAISEREG".to_string(), vec![Some(220.0)])]),
                     ..RegionSeries::default()
                 },
             )]),
@@ -815,8 +842,9 @@ END OF REPORT
         let old = br#"{"schema":2,"intervals":["t"],"regions":{"SA1":{"price":[1.0],
             "demand":[null],"available_generation":[null],"net_interchange":[null]}}}"#;
         let s: Series = serde_json::from_slice(old).unwrap();
-        assert!(s.regions["SA1"].crr.is_empty());
-        assert!(!serde_json::to_string(&s).unwrap().contains("crr"));
+        assert!(s.regions["SA1"].crr.is_empty() && s.regions["SA1"].fcas_price.is_empty());
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(!json.contains("crr") && !json.contains("fcas"));
         assert!(is_dc_link("T-V-MNSP1") && !is_dc_link("V-SA"));
     }
 
