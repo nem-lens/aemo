@@ -119,6 +119,10 @@ pub struct DayOffer {
     pub daily_energy_constraint: Option<f64>,
     /// MINIMUMLOAD, MW.
     pub minimum_load: Option<f64>,
+    /// T1 to T4, minutes: a fast-start unit's inflexibility profile. T1 is
+    /// the time to synchronise, T2 to ramp to minimum load, T3 the time at
+    /// or above it, and T4 to ramp back down.
+    pub fast_start: [Option<f64>; 4],
     /// REBIDEXPLANATION: the participant's reason for a rebid, as written.
     pub rebid_explanation: String,
     /// REBID_CATEGORY: the reason's category code, where given.
@@ -307,6 +311,7 @@ fn day_offer(r: &impl Fields) -> Result<DayOffer> {
         price_bands: bands(r, "PRICEBAND")?,
         daily_energy_constraint: r.num("DAILYENERGYCONSTRAINT"),
         minimum_load: r.num("MINIMUMLOAD"),
+        fast_start: ["T1", "T2", "T3", "T4"].map(|c| r.num(c)),
         rebid_explanation: text("REBIDEXPLANATION"),
         rebid_category: text("REBID_CATEGORY"),
         entry_type: text("ENTRYTYPE"),
