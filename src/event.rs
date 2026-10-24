@@ -267,6 +267,11 @@ pub struct RegionSeries {
     /// region could not replace its largest loss. Arithmetic on AEMO figures
     /// (DISPATCH UNIT_SOLUTION and INTERCONNECTORRES, pricing run); absent
     /// in files written before it existed, or without next-day unit data.
+    ///
+    /// Inspired by WattClarity's Instantaneous Reserve Plant Margin (IRPM),
+    /// surplus available generation over demand across the NEM. The CRR is
+    /// per region and scaled by the largest contingency rather than demand;
+    /// the library README sets out the differences and why.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub contingency: Vec<Option<String>>,
     /// The contingency's MW.
