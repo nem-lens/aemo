@@ -202,11 +202,14 @@ impl MnspOffers {
             }),
             Some(MnspTable::PeriodOffer) => {
                 let trading_date = time_of(r, &["TRADINGDATE", "SETTLEMENTDATE"])?.date();
-                // MNSP_BIDOFFERPERIOD is always in five-minute periods, even
-                // in the archive months before five-minute settlement (from
-                // March 2021) that carry it; MNSP_PEROFFER is in 30-minute
-                // periods until then.
-                let (period_from, period_to) = if r.key().ends_with("MNSP_BIDOFFERPERIOD") {
+                // MNSP_BIDOFFERPERIOD's layout (TRADINGDATE, OFFERDATETIME)
+                // is always in five-minute periods, even in the archive
+                // months before five-minute settlement (from March 2021) that
+                // carry it; MNSP_PEROFFER's (SETTLEMENTDATE, OFFERDATE) is in
+                // 30-minute periods until then. Decided by the layout, not
+                // the key: a reader may key both tables alike (an event
+                // record keeps either in one file).
+                let (period_from, period_to) = if r.text("TRADINGDATE").is_some() {
                     let p = period(r, "PERIODID")?;
                     (p, p)
                 } else {
@@ -349,6 +352,20 @@ D,MNSP,PEROFFER,1,2020/01/30 00:00:00,2020/01/30 18:22:00,2,BLNKTAS,29,100,0,0,0
             .map(|l| (l.link_id.as_str(), l.max_capacity))
             .collect();
         assert_eq!(caps, [("BLNKTAS", Some(594.0)), ("BLNKVIC", Some(478.0))]);
+    }
+
+    #[test]
+    fn half_hour_layout_read_under_the_five_minute_key() {
+        // An event record keeps MNSP_PEROFFER rows in the file read as
+        // MNSP_BIDOFFERPERIOD; their periods are still half hours.
+        let old = OLD
+            .replace("I,MNSP,PEROFFER", "I,BIDS,MNSP_BIDOFFERPERIOD")
+            .replace("D,MNSP,PEROFFER", "D,BIDS,MNSP_BIDOFFERPERIOD");
+        let mut o = MnspOffers::default();
+        visit_report(old.as_bytes(), |r| o.push(r)).unwrap();
+        assert_eq!(o.periods.len(), 2);
+        let p = &o.periods[0];
+        assert_eq!((p.period_from, p.period_to), (169, 174));
     }
 
     #[test]
