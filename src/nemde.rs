@@ -286,7 +286,8 @@ pub struct Interconnector {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct LossModel {
     /// LossModelID; [`InterconnectorPeriod::loss_model_id`] names the one
-    /// in force.
+    /// in force. The same ID appears under several interconnectors, so it
+    /// identifies a model only together with its interconnector.
     pub loss_model_id: String,
     /// LossLowerLimit, MW.
     pub loss_lower_limit: f64,
@@ -516,7 +517,8 @@ pub struct InterconnectorPeriod {
     pub upper_limit: f64,
     /// MNSP: whether it is an MNSP.
     pub mnsp: bool,
-    /// LossModelID: which of the interconnector's [`LossModel`]s applies.
+    /// LossModelID: which of this interconnector's [`LossModel`]s applies
+    /// (look it up under the same interconnector; IDs repeat across them).
     pub loss_model_id: String,
     /// MNSP offers, one per link direction.
     pub mnsp_offers: Vec<MnspOffer>,
