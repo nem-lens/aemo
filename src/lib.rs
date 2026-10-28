@@ -19,6 +19,8 @@
 //!   force for an interval.
 //! - [`mnsp`]: offers of market network service providers (Basslink), which
 //!   cap and price their links' flow.
+//! - [`nemde`]: NEMDE case files: the dispatch engine's inputs and solution
+//!   for each interval, from AEMO's NEMDE archive.
 //! - [`time`]: market time (AEST, interval end), trading days, regional clocks.
 //! - [`files`]: NEMWeb file name patterns and unzipping (buffered or streamed).
 //! - [`event`]: the NEM Lens event record schema, each file and field tagged
@@ -54,7 +56,7 @@
 //!
 //! # Data
 //!
-//! AEMO's data is © AEMO and used under
+//! AEMO's data is Â© AEMO and used under
 //! [AEMO's copyright permissions](https://www.aemo.com.au/privacy-and-legal-notices/copyright-permissions).
 //! This crate contains no AEMO data, only code that reads it.
 
@@ -65,6 +67,7 @@ pub mod dispatch;
 pub mod event;
 pub mod files;
 pub mod mnsp;
+pub mod nemde;
 pub mod report;
 pub mod time;
 
