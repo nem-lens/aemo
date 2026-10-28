@@ -17,6 +17,8 @@
 //!   constraints, interconnectors), pricing run only.
 //! - [`bids`]: typed offers from next-day offer files, and the version in
 //!   force for an interval.
+//! - [`mnsp`]: offers of market network service providers (Basslink), which
+//!   cap and price their links' flow.
 //! - [`time`]: market time (AEST, interval end), trading days, regional clocks.
 //! - [`files`]: NEMWeb file name patterns and unzipping (buffered or streamed).
 //! - [`event`]: the NEM Lens event record schema, each file and field tagged
@@ -62,6 +64,7 @@ pub mod bids;
 pub mod dispatch;
 pub mod event;
 pub mod files;
+pub mod mnsp;
 pub mod report;
 pub mod time;
 

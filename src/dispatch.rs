@@ -78,6 +78,8 @@ pub struct InterconnectorRow {
     /// MARGINALLOSS: the interconnector's marginal loss factor at `flow`,
     /// one plus the rate at which losses grow with flow.
     pub marginal_loss: Option<f64>,
+    /// MWLOSSES, MW: the interconnector's losses at `flow`.
+    pub losses: Option<f64>,
 }
 
 /// INTERVENTION = 0 is the pricing run, which sets the published price. A
@@ -199,6 +201,7 @@ pub fn snapshot_from<F: Fields>(
             import_limit: r.num("IMPORTLIMIT"),
             marginal: r.num("MARGINALVALUE").unwrap_or(0.0),
             marginal_loss: r.num("MARGINALLOSS"),
+            losses: r.num("MWLOSSES"),
         });
     }
     Ok(snap)

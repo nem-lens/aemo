@@ -274,12 +274,12 @@ impl Offers {
     }
 }
 
-fn required<'a>(r: &'a impl Fields, col: &str) -> Result<std::borrow::Cow<'a, str>> {
+pub(crate) fn required<'a>(r: &'a impl Fields, col: &str) -> Result<std::borrow::Cow<'a, str>> {
     r.text(col)
         .with_context(|| format!("{} row is missing {col}", r.key()))
 }
 
-fn time(r: &impl Fields, col: &str) -> Result<NaiveDateTime> {
+pub(crate) fn time(r: &impl Fields, col: &str) -> Result<NaiveDateTime> {
     let t = r.time(col);
     t.with_context(|| match r.text(col) {
         Some(s) => format!("{} {col} is not a market time: {s}", r.key()),
@@ -287,7 +287,7 @@ fn time(r: &impl Fields, col: &str) -> Result<NaiveDateTime> {
     })
 }
 
-fn bands(r: &impl Fields, prefix: &str) -> Result<[f64; 10]> {
+pub(crate) fn bands(r: &impl Fields, prefix: &str) -> Result<[f64; 10]> {
     let mut out = [0.0; 10];
     for (i, v) in out.iter_mut().enumerate() {
         let col = format!("{prefix}{}", i + 1);
@@ -318,7 +318,7 @@ fn day_offer(r: &impl Fields) -> Result<DayOffer> {
     })
 }
 
-fn period(r: &impl Fields, col: &str) -> Result<u16> {
+pub(crate) fn period(r: &impl Fields, col: &str) -> Result<u16> {
     let p: u16 = required(r, col)?
         .parse()
         .with_context(|| format!("{} {col} is not a period", r.key()))?;
@@ -338,7 +338,7 @@ fn five_minute_day() -> NaiveDate {
 
 /// A time from the first of `cols` present: the sparse table and the older
 /// BIDPEROFFER table name the same fields differently.
-fn time_of(r: &impl Fields, cols: &[&str]) -> Result<NaiveDateTime> {
+pub(crate) fn time_of(r: &impl Fields, cols: &[&str]) -> Result<NaiveDateTime> {
     let col = cols
         .iter()
         .find(|c| r.text(c).is_some())
@@ -350,7 +350,7 @@ fn time_of(r: &impl Fields, cols: &[&str]) -> Result<NaiveDateTime> {
 /// The five-minute periods a row covers. A BIDPEROFFER row has PERIODID
 /// alone: one period, or before five-minute settlement one 30-minute
 /// trading interval, which is six five-minute periods.
-fn periods(r: &impl Fields, day: NaiveDate) -> Result<(u16, u16)> {
+pub(crate) fn periods(r: &impl Fields, day: NaiveDate) -> Result<(u16, u16)> {
     if r.text("PERIODIDTO").is_some() {
         return Ok((period(r, "PERIODID")?, period(r, "PERIODIDTO")?));
     }
@@ -508,6 +508,99 @@ impl DayOffer {
     }
 }
 
+impl PeriodOffer {
+    /// The version this row belongs to.
+    pub fn version(&self) -> VersionKey {
+        (
+            key(
+                &self.duid,
+                &self.bid_type,
+                self.direction,
+                self.trading_date,
+            ),
+            self.offer_time,
+        )
+    }
+}
+
+/// The versions the period offers name that have no day offer.
+///
+/// A standing offer, submitted days or years before the trading day (WRWF1's
+/// of 2 Aug 2018 was in force on 30 Jan 2020), has period rows under each
+/// trading day it applies to, but MMSDM's BIDDAYOFFER has its prices only
+/// under the day it was submitted for. Without them a reader has quantities
+/// with no prices. MMSDM's BIDDAYOFFER_D lists the day offers in force on
+/// each trading day, standing offers included: read the missing versions
+/// from it with [`read_standing_offers`].
+pub fn missing_day_offers(offers: &Offers) -> HashSet<VersionKey> {
+    let have: HashSet<VersionKey> = offers.day.iter().map(DayOffer::version).collect();
+    offers
+        .periods
+        .iter()
+        .map(PeriodOffer::version)
+        .filter(|v| !have.contains(v))
+        .collect()
+}
+
+/// The version a day-offer row belongs to, from any of AEMO's day-offer
+/// tables (BIDDAYOFFER, BIDDAYOFFER_D, the next-day files), or `None` if it
+/// lacks a key field. Lets a caller keep raw rows of the versions it wants.
+pub fn day_offer_version(r: &impl Fields) -> Option<VersionKey> {
+    Some((
+        key(
+            r.text("DUID")?.as_ref(),
+            r.text("BIDTYPE")?.as_ref(),
+            Direction::parse(r.text("DIRECTION").as_deref()),
+            r.time("SETTLEMENTDATE")?.date(),
+        ),
+        r.time("OFFERDATE")?,
+    ))
+}
+
+/// Stream a day-offer table, typically MMSDM's BIDDAYOFFER_D, and keep the
+/// day offers of the `wanted` versions (from [`missing_day_offers`]), each
+/// once. Rows of other tables are ignored.
+///
+/// # Errors
+///
+/// If the CSV is malformed or a wanted row lacks a price band.
+pub fn read_standing_offers<R: Read>(
+    reader: R,
+    wanted: &HashSet<VersionKey>,
+) -> Result<Vec<DayOffer>> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    visit_report(reader, |r| {
+        let k = r.key();
+        if !(k.ends_with("BIDDAYOFFER") || k.ends_with("BIDDAYOFFER_D")) {
+            return Ok(());
+        }
+        if let Some(v) = day_offer_version(r) {
+            if wanted.contains(&v) && seen.insert(v) {
+                out.push(day_offer(r)?);
+            }
+        }
+        Ok(())
+    })?;
+    Ok(out)
+}
+
+impl Offers {
+    /// Add day offers for versions that have none (from
+    /// [`read_standing_offers`]); others are ignored. Returns how many were
+    /// added.
+    pub fn add_standing(&mut self, found: impl IntoIterator<Item = DayOffer>) -> usize {
+        let mut have: HashSet<VersionKey> = self.day.iter().map(DayOffer::version).collect();
+        let before = self.day.len();
+        for d in found {
+            if have.insert(d.version()) {
+                self.day.push(d);
+            }
+        }
+        self.day.len() - before
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -552,6 +645,56 @@ D,BIDS,BIDOFFERPERIOD_SPARSE,2,U1,ENERGY,2026/10/16 00:00:00,2026/10/15 12:00:00
         assert_eq!(o.periods[1].period_from, 121);
         assert_eq!(o.periods[2].band_avail[9], 80.0);
         assert_eq!(o.day[0].version_no, Some(1));
+    }
+
+    #[test]
+    fn standing_offers_fill_missing_day_offers() {
+        // WRWF1 on 30 Jan 2020: a period row for a version submitted for
+        // 2 Aug 2018, and no day offer for it; U2 has both.
+        let record = "\
+I,BIDS,BIDDAYOFFER,1,DUID,BIDTYPE,SETTLEMENTDATE,OFFERDATE,PRICEBAND1,PRICEBAND2,PRICEBAND3,PRICEBAND4,PRICEBAND5,PRICEBAND6,PRICEBAND7,PRICEBAND8,PRICEBAND9,PRICEBAND10
+D,BIDS,BIDDAYOFFER,1,U2,ENERGY,2020/01/30 00:00:00,2020/01/30 09:00:00,-1000,0,1,2,3,4,5,6,7,14700
+I,BIDS,BIDOFFERPERIOD_SPARSE,1,DUID,BIDTYPE,SETTLEMENTDATE,OFFERDATE,PERIODID,MAXAVAIL,BANDAVAIL1,BANDAVAIL2,BANDAVAIL3,BANDAVAIL4,BANDAVAIL5,BANDAVAIL6,BANDAVAIL7,BANDAVAIL8,BANDAVAIL9,BANDAVAIL10
+D,BIDS,BIDOFFERPERIOD_SPARSE,1,WRWF1,ENERGY,2020/01/30 00:00:00,2018/08/02 16:40:45,29,172,172,0,0,0,0,0,0,0,0,0
+D,BIDS,BIDOFFERPERIOD_SPARSE,1,U2,ENERGY,2020/01/30 00:00:00,2020/01/30 09:00:00,29,100,100,0,0,0,0,0,0,0,0,0
+";
+        let mut o = read_offers(record.as_bytes(), &OfferFilter::default()).unwrap();
+        let missing = missing_day_offers(&o);
+        let day = NaiveDate::from_ymd_opt(2020, 1, 30).unwrap();
+        let wrwf1 = (
+            key("WRWF1", "ENERGY", Direction::Gen, day),
+            t("2018/08/02 16:40:45"),
+        );
+        assert_eq!(missing, HashSet::from([wrwf1.clone()]));
+
+        // BIDDAYOFFER_D lists the standing offer under the trading day, and
+        // other units' offers that are not wanted.
+        let daily = "\
+I,BID,BIDDAYOFFER_D,2,SETTLEMENTDATE,DUID,BIDTYPE,BIDSETTLEMENTDATE,OFFERDATE,VERSIONNO,PRICEBAND1,PRICEBAND2,PRICEBAND3,PRICEBAND4,PRICEBAND5,PRICEBAND6,PRICEBAND7,PRICEBAND8,PRICEBAND9,PRICEBAND10
+D,BID,BIDDAYOFFER_D,2,2020/01/30 00:00:00,WRWF1,ENERGY,2018/08/02 00:00:00,2018/08/02 16:40:45,1,0,1,2,3,4,5,6,7,8,256
+D,BID,BIDDAYOFFER_D,2,2020/01/30 00:00:00,WRWF1,ENERGY,2018/08/02 00:00:00,2018/08/02 16:40:45,1,0,1,2,3,4,5,6,7,8,256
+D,BID,BIDDAYOFFER_D,2,2020/01/30 00:00:00,U3,ENERGY,2020/01/30 00:00:00,2020/01/29 10:00:00,1,0,1,2,3,4,5,6,7,8,9
+";
+        let found = read_standing_offers(daily.as_bytes(), &missing).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].version(), wrwf1);
+        assert_eq!(found[0].price_bands[9], 256.0);
+        assert_eq!(o.add_standing(found.clone()), 1);
+        assert_eq!(o.add_standing(found), 0);
+        assert!(missing_day_offers(&o).is_empty());
+
+        // The standing offer is now in force for the interval.
+        let (d, p) = o
+            .index()
+            .effective(
+                "WRWF1",
+                "ENERGY",
+                Direction::Gen,
+                t("2020/01/30 18:20:00"),
+                t("2020/01/30 18:15:00"),
+            )
+            .unwrap();
+        assert_eq!((d.price_bands[0], p.max_avail), (0.0, Some(172.0)));
     }
 
     #[test]
