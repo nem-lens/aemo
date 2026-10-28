@@ -14,6 +14,8 @@ bytes and pass them in, so results are deterministic and the crate builds for
 | `time` | Market time (AEST, UTC+10, interval end), the 04:00 trading day, regional local clocks |
 | `files` | NEMWeb file name patterns (DispatchIS, Next_Day_*, Bidmove_*) and unzipping with a per-member size limit |
 | `bids` | Typed offers from next-day offer files, and the version in force for an interval |
+| `mnsp` | Offers of market network service providers (Basslink), which cap and price their links' flow |
+| `nemde` | NEMDE case files from AEMO's NEMDE archive: the dispatch engine's inputs (penalty prices, referred band prices, availability, loss models, MNSP offers, generic constraints) and its solution and price setters, per interval, 2020 onwards |
 | `event` | The NEM Lens event record schema, each file and field public or private, and the gate for the public library |
 
 API documentation, with examples: https://nem-lens.github.io/aemo/nem_lens_aemo/

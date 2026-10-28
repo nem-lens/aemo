@@ -174,6 +174,12 @@ pub struct CaseFile {
     pub solution: Solution,
     /// The bands that set each price.
     pub price_setting: Vec<PriceSetting>,
+    /// In a manual over-constrained dispatch (OCD) re-run case, the price
+    /// setters of the original run (`PriceSetting_Original`).
+    pub price_setting_original: Vec<PriceSetting>,
+    /// In an OCD re-run case, what triggered it (`Violating_GenericConstraint`,
+    /// e.g. Violation_Type NETWORK).
+    pub ocd_violations: Vec<Attrs>,
     /// Elements with attributes that this module does not read, by name.
     pub unread: BTreeSet<String>,
 }
@@ -557,6 +563,30 @@ pub struct Solution {
     pub traders: Vec<TraderSolution>,
     /// Constraint results.
     pub constraints: Vec<ConstraintSolution>,
+    /// In a manual OCD re-run case, the original run's region results
+    /// (`RegionSolution_Original`); `regions` then holds the re-run's.
+    pub regions_original: Vec<RegionSolution>,
+    /// In a manual OCD re-run case, FCAS constraint results
+    /// (`ConstraintSolution_FCAS_OCD`).
+    pub fcas_ocd_constraints: Vec<FcasOcdConstraint>,
+}
+
+/// A FCAS constraint's result in an OCD re-run case
+/// (`ConstraintSolution_FCAS_OCD`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FcasOcdConstraint {
+    /// ConstraintID.
+    pub constraint_id: String,
+    /// Intervention.
+    pub intervention: bool,
+    /// RHS.
+    pub rhs: f64,
+    /// MarginalValue.
+    pub marginal_value: f64,
+    /// ViolationDegree, MW.
+    pub violation_degree: f64,
+    /// Every other attribute.
+    pub other: Attrs,
 }
 
 /// A region's result (`RegionSolution`).
@@ -648,9 +678,12 @@ pub struct PriceSetting {
     pub unit: String,
     /// DispatchedMarket: the market of the band (ENOF, R6SE, ...).
     pub dispatched_market: String,
-    /// BandNo; absent for NEMDE's tie-break variables (DispatchedMarket
-    /// tbslack1 or tbslack2, Unit naming the tied pair of bands).
-    pub band_no: Option<u32>,
+    /// BandNo, as text: a band number ("1" to "10") for an offer band; the
+    /// constraint's version (e.g. "20220419000000_1") where a constraint's
+    /// violation sets the price (DispatchedMarket GenericConstraintSurplus,
+    /// Unit the ConstraintID); absent for NEMDE's tie-break variables
+    /// (DispatchedMarket tbslack1 or tbslack2, Unit naming the tied pair).
+    pub band_no: Option<String>,
     /// Increase: the change in the band's dispatch per MW of the region's
     /// requirement.
     pub increase: f64,
@@ -1099,14 +1132,19 @@ fn element(
         }
         "CaseSolution" => out.solution.case = a.0,
         "PeriodSolution" => out.solution.periods.push(a.0),
-        "RegionSolution" => out.solution.regions.push(RegionSolution {
-            region_id: a.s("RegionID")?,
-            period_id: a.t("PeriodID")?,
-            intervention: a.b("Intervention")?,
-            energy_price: a.f("EnergyPrice")?,
-            net_export: a.f("NetExport")?,
-            other: a.0,
-        }),
+        "RegionSolution" => out.solution.regions.push(region_solution(a)?),
+        "RegionSolution_Original" => out.solution.regions_original.push(region_solution(a)?),
+        "ConstraintSolution_FCAS_OCD" => {
+            out.solution.fcas_ocd_constraints.push(FcasOcdConstraint {
+                constraint_id: a.s("ConstraintID")?,
+                intervention: a.b("Intervention")?,
+                rhs: a.f("RHS")?,
+                marginal_value: a.f("MarginalValue")?,
+                violation_degree: a.f("ViolationDegree")?,
+                other: a.0,
+            })
+        }
+        "Violating_GenericConstraint" => out.ocd_violations.push(a.0),
         "InterconnectorSolution" => out.solution.interconnectors.push(InterconnectorSolution {
             interconnector_id: a.s("InterconnectorID")?,
             period_id: a.t("PeriodID")?,
@@ -1133,24 +1171,8 @@ fn element(
             deficit: a.f("Deficit")?,
             other: a.0,
         }),
-        "PriceSetting" => {
-            let band_no = match a.os("BandNo") {
-                None => None,
-                Some(b) => Some(b.parse().with_context(|| format!("BandNo={b:?}"))?),
-            };
-            out.price_setting.push(PriceSetting {
-                period_id: a.t("PeriodID")?,
-                region_id: a.s("RegionID")?,
-                market: a.s("Market")?,
-                price: a.f("Price")?,
-                unit: a.s("Unit")?,
-                dispatched_market: a.s("DispatchedMarket")?,
-                band_no,
-                increase: a.f("Increase")?,
-                rrn_band_price: a.f("RRNBandPrice")?,
-                band_cost: a.f("BandCost")?,
-            })
-        }
+        "PriceSetting" => out.price_setting.push(price_setting(a)?),
+        "PriceSetting_Original" => out.price_setting_original.push(price_setting(a)?),
         _ => {
             if !a.0.is_empty() {
                 out.unread.insert(name.to_string());
@@ -1158,6 +1180,33 @@ fn element(
         }
     }
     Ok(())
+}
+
+fn region_solution(mut a: A) -> Result<RegionSolution> {
+    Ok(RegionSolution {
+        region_id: a.s("RegionID")?,
+        period_id: a.t("PeriodID")?,
+        intervention: a.b("Intervention")?,
+        energy_price: a.f("EnergyPrice")?,
+        net_export: a.f("NetExport")?,
+        other: a.0,
+    })
+}
+
+fn price_setting(mut a: A) -> Result<PriceSetting> {
+    let band_no = a.os("BandNo");
+    Ok(PriceSetting {
+        period_id: a.t("PeriodID")?,
+        region_id: a.s("RegionID")?,
+        market: a.s("Market")?,
+        price: a.f("Price")?,
+        unit: a.s("Unit")?,
+        dispatched_market: a.s("DispatchedMarket")?,
+        band_no,
+        increase: a.f("Increase")?,
+        rrn_band_price: a.f("RRNBandPrice")?,
+        band_cost: a.f("BandCost")?,
+    })
 }
 
 #[cfg(test)]

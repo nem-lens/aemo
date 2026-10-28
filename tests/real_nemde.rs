@@ -260,5 +260,12 @@ fn reads_whole_case_files() {
         );
         // Intervention cases solve twice, so units can have two solutions.
         assert!(c.solution.traders.len() >= c.traders.len());
+        assert!(c.unread.is_empty(), "unread elements: {:?}", c.unread);
+        if parse_case_name(&path.file_name().unwrap().to_string_lossy())
+            .is_some_and(|n| !n.is_dispatch_run())
+        {
+            assert!(!c.solution.regions_original.is_empty());
+            assert!(!c.price_setting_original.is_empty());
+        }
     }
 }
